@@ -11,13 +11,24 @@ public actor SystemDataAnalyzer {
         let isUserCleanable: Bool
     }
 
+    private struct CachedProbeResult {
+        let timestamp: Date
+        let size: Int64
+        let hadPermissionIssue: Bool
+        let wasTruncated: Bool
+    }
+
+    private var probeCache: [String: CachedProbeResult] = [:]
+
     public init() {}
 
     public func analyze(
         volumeStats: VolumeStats,
         knownScanBytes: Int64? = nil,
         customHomeURL: URL? = nil,
-        maxFilesPerLocation: Int = 35_000
+        maxFilesPerLocation: Int = 35_000,
+        premeasuredDirectorySizes: [String: Int64] = [:],
+        useCachedProbes: Bool = false
     ) async -> SystemDataReport {
         let home = (customHomeURL ?? FileManager.default.homeDirectoryForCurrentUser).path
         let specs: [ProbeSpec] = [
@@ -201,18 +212,52 @@ public actor SystemDataAnalyzer {
             // Avoid double-counting child probes inside parent probes
             let excludedSubpath: String?
             if spec.relativeOrAbsolutePath == "Library/Caches" {
-                excludedSubpath = URL(fileURLWithPath: home).appendingPathComponent("Library/Caches/Homebrew").standardizedFileURL.path
+                excludedSubpath = StorageScanner.fastCleanPath(URL(fileURLWithPath: home).appendingPathComponent("Library/Caches/Homebrew").standardizedFileURL.path)
             } else if spec.relativeOrAbsolutePath == "Library/Application Support" {
-                excludedSubpath = URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/MobileSync/Backup").standardizedFileURL.path
+                excludedSubpath = StorageScanner.fastCleanPath(URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/MobileSync/Backup").standardizedFileURL.path)
             } else {
                 excludedSubpath = nil
             }
 
-            let (size, hadPermissionIssue, wasTruncated) = measureDirectoryBytes(
-                at: url,
-                maxFiles: maxFilesPerLocation,
-                excludingSubpath: excludedSubpath
-            )
+            let cleanedFullPath = StorageScanner.fastCleanPath(url.standardizedFileURL.path)
+            let size: Int64
+            let hadPermissionIssue: Bool
+            let wasTruncated: Bool
+
+            if let premeasured = premeasuredDirectorySizes[cleanedFullPath] {
+                let subtracted = excludedSubpath.flatMap { premeasuredDirectorySizes[$0] } ?? 0
+                size = max(0, premeasured - subtracted)
+                hadPermissionIssue = false
+                wasTruncated = false
+                probeCache[cleanedFullPath] = CachedProbeResult(
+                    timestamp: Date(),
+                    size: size,
+                    hadPermissionIssue: false,
+                    wasTruncated: false
+                )
+            } else if useCachedProbes,
+                      let cached = probeCache[cleanedFullPath],
+                      Date().timeIntervalSince(cached.timestamp) < 120 {
+                size = cached.size
+                hadPermissionIssue = cached.hadPermissionIssue
+                wasTruncated = cached.wasTruncated
+            } else {
+                let measured = await measureDirectoryBytes(
+                    at: url,
+                    maxFiles: maxFilesPerLocation,
+                    excludingSubpath: excludedSubpath
+                )
+                size = measured.0
+                hadPermissionIssue = measured.1
+                wasTruncated = measured.2
+                probeCache[cleanedFullPath] = CachedProbeResult(
+                    timestamp: Date(),
+                    size: size,
+                    hadPermissionIssue: hadPermissionIssue,
+                    wasTruncated: wasTruncated
+                )
+            }
+
             totalMeasured += size
             if hadPermissionIssue {
                 restrictedCount += 1
@@ -266,7 +311,7 @@ public actor SystemDataAnalyzer {
         maxFiles: Int,
         maxSeconds: TimeInterval = 1.0,
         excludingSubpath: String? = nil
-    ) -> (Int64, Bool, Bool) {
+    ) async -> (Int64, Bool, Bool) {
         let keys: [URLResourceKey] = [
             .isSymbolicLinkKey,
             .totalFileAllocatedSizeKey,
@@ -279,7 +324,7 @@ public actor SystemDataAnalyzer {
         guard let enumerator = FileManager.default.enumerator(
             at: directoryURL,
             includingPropertiesForKeys: keys,
-            options: [],
+            options: [.skipsPackageDescendants],
             errorHandler: { _, _ in
                 permissionErrorOccurred = true
                 return true
@@ -288,19 +333,25 @@ public actor SystemDataAnalyzer {
             return (0, true, false)
         }
 
+        let excludedPrefix = excludingSubpath.map { $0 + "/" }
         let deadline = Date().addingTimeInterval(maxSeconds)
         var seenInodes: Set<AnyHashable> = []
         var total: Int64 = 0
         var count = 0
         var truncated = false
         while let fileURL = enumerator.nextObject() as? URL {
-            if count % 400 == 0 && Task.isCancelled {
-                truncated = true
-                break
+            if count % 400 == 0 {
+                if Task.isCancelled {
+                    truncated = true
+                    break
+                }
+                if count > 0 && count % 1600 == 0 {
+                    await Task.yield()
+                }
             }
-            if let excludingSubpath {
-                let p = fileURL.standardizedFileURL.path
-                if p == excludingSubpath || p.hasPrefix(excludingSubpath + "/") {
+            if let excludingSubpath, let excludedPrefix {
+                let p = StorageScanner.fastCleanPath(fileURL.path)
+                if p == excludingSubpath || p.hasPrefix(excludedPrefix) {
                     enumerator.skipDescendants()
                     continue
                 }

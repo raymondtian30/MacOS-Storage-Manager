@@ -23,7 +23,7 @@ public enum AppAppearanceMode: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 @Observable
 public final class AppState {
-    public nonisolated static let currentVersion = "1.2.1"
+    public nonisolated static let currentVersion = "1.2.2"
 
     // Navigation
     public var selectedSection: NavigationSection = .overview
@@ -101,10 +101,19 @@ public final class AppState {
     }
     public var historyRetentionDays: Int {
         didSet {
-            UserDefaults.standard.set(historyRetentionDays, forKey: "spacesense.historyRetentionDays")
-            historyStore.pruneOldSnapshots(retentionDays: historyRetentionDays)
-            historySnapshots = historyStore.fetchSnapshots()
-            growthDeltas = historyStore.computeGrowthDeltas(snapshots: historySnapshots)
+            let retention = historyRetentionDays
+            UserDefaults.standard.set(retention, forKey: "spacesense.historyRetentionDays")
+            let store = historyStore
+            Task.detached(priority: .utility) { [weak self] in
+                store.pruneOldSnapshots(retentionDays: retention)
+                let snapshots = store.fetchSnapshots()
+                let deltas = store.computeGrowthDeltas(snapshots: snapshots)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.historySnapshots = snapshots
+                    self.growthDeltas = deltas
+                }
+            }
         }
     }
     public var appearanceMode: AppAppearanceMode {
@@ -265,13 +274,21 @@ public final class AppState {
                 self.analyzerBreadcrumbs = [result.rootNode]
                 self.isScanning = false
 
-                _ = historyStore.recordScan(result, retentionDays: historyRetentionDays)
-                self.historySnapshots = historyStore.fetchSnapshots()
-                self.growthDeltas = historyStore.computeGrowthDeltas(snapshots: self.historySnapshots)
+                let store = self.historyStore
+                let retention = self.historyRetentionDays
+                Task.detached(priority: .utility) { [weak self] in
+                    _ = store.recordScan(result, retentionDays: retention)
+                    let snapshots = store.fetchSnapshots()
+                    let deltas = store.computeGrowthDeltas(snapshots: snapshots)
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        self.historySnapshots = snapshots
+                        self.growthDeltas = deltas
+                    }
+                }
 
-                await refreshSystemData()
+                await refreshSystemData(useCachedProbes: true)
                 await runDuplicateScan()
-                await refreshCleanupRecommendationsAsync()
 
                 if enableScanNotifications {
                     postScanCompletedNotification(result: result)
@@ -377,12 +394,15 @@ public final class AppState {
 
     // MARK: - System Data & Non-Blocking Cleanup Recommendations
 
-    public func refreshSystemData() async {
+    public func refreshSystemData(useCachedProbes: Bool = false) async {
         isAnalyzingSystemData = true
         refreshVolumeStats()
+        let premeasured = includeHiddenFiles ? (latestScanResult?.measuredDirectorySizes ?? [:]) : [:]
         let report = await systemDataAnalyzer.analyze(
             volumeStats: volumeStats,
-            knownScanBytes: latestScanResult?.rootNode.size
+            knownScanBytes: latestScanResult?.rootNode.size,
+            premeasuredDirectorySizes: premeasured,
+            useCachedProbes: useCachedProbes
         )
         self.systemDataReport = report
         self.isAnalyzingSystemData = false
@@ -483,14 +503,21 @@ public final class AppState {
         }
 
         if let currentScan = latestScanResult, !trashedSet.isEmpty {
-            let trashedFiles = currentScan.allFiles.filter { Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.url.standardizedFileURL.path), in: trashedSet) }
             var updatedCategories = currentScan.categoryBytes
-            for file in trashedFiles {
-                updatedCategories[file.category] = max(0, (updatedCategories[file.category] ?? 0) - file.size)
+            var updatedAll: [LargeFileItem] = []
+            updatedAll.reserveCapacity(currentScan.allFiles.count)
+            var trashedCount = 0
+
+            for file in currentScan.allFiles {
+                if Self.isPathOrDescendant(StorageScanner.fastCleanPath(file.path), in: trashedSet) {
+                    updatedCategories[file.category] = max(0, (updatedCategories[file.category] ?? 0) - file.size)
+                    trashedCount += 1
+                } else {
+                    updatedAll.append(file)
+                }
             }
 
-            let updatedLarge = currentScan.largeFiles.filter { !Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.url.standardizedFileURL.path), in: trashedSet) }
-            let updatedAll = currentScan.allFiles.filter { !Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.url.standardizedFileURL.path), in: trashedSet) }
+            let updatedLarge = currentScan.largeFiles.filter { !Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.path), in: trashedSet) }
             let updatedRoot = Self.pruneTree(node: currentScan.rootNode, trashedPaths: trashedSet).node
 
             latestScanResult = ScanResult(
@@ -502,10 +529,11 @@ public final class AppState {
                 categoryBytes: updatedCategories,
                 largeFiles: updatedLarge,
                 allFiles: updatedAll,
-                totalFilesScanned: max(0, currentScan.totalFilesScanned - trashedFiles.count),
+                totalFilesScanned: max(0, currentScan.totalFilesScanned - trashedCount),
                 totalDirectoriesScanned: currentScan.totalDirectoriesScanned,
                 permissionErrorCount: currentScan.permissionErrorCount,
-                volumeStats: volumeStats
+                volumeStats: volumeStats,
+                measuredDirectorySizes: currentScan.measuredDirectorySizes
             )
 
             // Re-sync breadcrumbs and current analyzer node from the updated tree

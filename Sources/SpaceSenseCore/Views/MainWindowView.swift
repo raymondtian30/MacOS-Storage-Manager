@@ -32,11 +32,9 @@ public struct MainWindowView: View {
                 }
 
                 if appState.isScanning {
-                    ScanProgressBanner(progress: appState.scanProgress) {
-                        appState.cancelScan()
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 14)
+                    ActiveScanBannerHost(appState: appState)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 14)
                 }
 
                 detailView
@@ -158,5 +156,15 @@ public struct MainWindowView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(tint.opacity(0.14))
+    }
+}
+
+private struct ActiveScanBannerHost: View {
+    let appState: AppState
+
+    var body: some View {
+        ScanProgressBanner(progress: appState.scanProgress) {
+            appState.cancelScan()
+        }
     }
 }

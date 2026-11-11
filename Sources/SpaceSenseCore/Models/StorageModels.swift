@@ -73,10 +73,33 @@ public enum StorageCategory: String, CaseIterable, Codable, Identifiable, Sendab
         }
     }
 
+    private static let developerExtensions: Set<String> = [
+        "swift", "xcodeproj", "xcworkspace", "py", "js", "ts", "tsx",
+        "rs", "go", "c", "cpp", "h", "java", "kt", "o", "dylib", "a"
+    ]
+
+    private static let mediaExtensions: Set<String> = [
+        "jpg", "jpeg", "png", "heic", "gif", "webp", "tiff", "raw",
+        "cr2", "dng", "mp4", "mov", "mkv", "avi", "mp3", "wav", "aac", "flac", "m4a"
+    ]
+
+    private static let documentExtensions: Set<String> = [
+        "pdf", "doc", "docx", "txt", "rtf", "md", "pages", "numbers",
+        "key", "xls", "xlsx", "ppt", "pptx", "csv", "epub"
+    ]
+
     public static func classify(url: URL, isDirectory: Bool = false) -> StorageCategory {
-        let path = url.path
+        classify(path: url.path, fileExtension: url.pathExtension, isDirectory: isDirectory)
+    }
+
+    public static func classify(path: String, fileExtension: String? = nil, isDirectory: Bool = false) -> StorageCategory {
         let lowerPath = path.lowercased()
-        let ext = url.pathExtension.lowercased()
+        let ext: String
+        if let fileExtension {
+            ext = fileExtension.lowercased()
+        } else {
+            ext = (path as NSString).pathExtension.lowercased()
+        }
 
         if lowerPath.contains("/applications/") || ext == "app" {
             return .applications
@@ -98,18 +121,18 @@ public enum StorageCategory: String, CaseIterable, Codable, Identifiable, Sendab
             lowerPath.contains("/.git/") ||
             lowerPath.contains("/.cargo/") ||
             lowerPath.contains("/.gradle/") ||
-            ["swift", "xcodeproj", "xcworkspace", "py", "js", "ts", "tsx", "rs", "go", "c", "cpp", "h", "java", "kt", "o", "dylib", "a"].contains(ext) {
+            (!ext.isEmpty && developerExtensions.contains(ext)) {
             return .developer
         }
         if lowerPath.contains("/pictures/") ||
             lowerPath.contains("/movies/") ||
             lowerPath.contains("/music/") ||
-            ["jpg", "jpeg", "png", "heic", "gif", "webp", "tiff", "raw", "cr2", "dng", "mp4", "mov", "mkv", "avi", "mp3", "wav", "aac", "flac", "m4a"].contains(ext) {
+            (!ext.isEmpty && mediaExtensions.contains(ext)) {
             return .photosAndMedia
         }
         if lowerPath.contains("/documents/") ||
             lowerPath.contains("/desktop/") ||
-            ["pdf", "doc", "docx", "txt", "rtf", "md", "pages", "numbers", "key", "xls", "xlsx", "ppt", "pptx", "csv", "epub"].contains(ext) {
+            (!ext.isEmpty && documentExtensions.contains(ext)) {
             return .documents
         }
         return .other
@@ -376,6 +399,7 @@ public struct ScanResult: Sendable {
     public let totalDirectoriesScanned: Int
     public let permissionErrorCount: Int
     public let volumeStats: VolumeStats
+    public let measuredDirectorySizes: [String: Int64]
 
     public init(
         id: UUID = UUID(),
@@ -389,7 +413,8 @@ public struct ScanResult: Sendable {
         totalFilesScanned: Int,
         totalDirectoriesScanned: Int,
         permissionErrorCount: Int,
-        volumeStats: VolumeStats
+        volumeStats: VolumeStats,
+        measuredDirectorySizes: [String: Int64] = [:]
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -403,22 +428,55 @@ public struct ScanResult: Sendable {
         self.totalDirectoriesScanned = totalDirectoriesScanned
         self.permissionErrorCount = permissionErrorCount
         self.volumeStats = volumeStats
+        self.measuredDirectorySizes = measuredDirectorySizes
     }
 }
 
 public enum ByteFormatting {
-    public static func string(_ bytes: Int64) -> String {
+    private static let lock = NSLock()
+    private static let standardFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB, .useTB]
         formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
-    }
+        return formatter
+    }()
 
-    public static func compactString(_ bytes: Int64) -> String {
+    private static let compactFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB, .useGB, .useTB]
         formatter.countStyle = .file
         formatter.includesUnit = true
-        return formatter.string(fromByteCount: bytes)
+        return formatter
+    }()
+
+    nonisolated(unsafe) private static var standardCache: [Int64: String] = [:]
+    nonisolated(unsafe) private static var compactCache: [Int64: String] = [:]
+
+    public static func string(_ bytes: Int64) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached = standardCache[bytes] {
+            return cached
+        }
+        let formatted = standardFormatter.string(fromByteCount: bytes)
+        if standardCache.count > 4096 {
+            standardCache.removeAll(keepingCapacity: true)
+        }
+        standardCache[bytes] = formatted
+        return formatted
+    }
+
+    public static func compactString(_ bytes: Int64) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached = compactCache[bytes] {
+            return cached
+        }
+        let formatted = compactFormatter.string(fromByteCount: bytes)
+        if compactCache.count > 1024 {
+            compactCache.removeAll(keepingCapacity: true)
+        }
+        compactCache[bytes] = formatted
+        return formatted
     }
 }

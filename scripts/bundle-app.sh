@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="SpaceSense"
-VERSION="1.2.1"
+VERSION="1.2.2"
 BUILD_DIR="${ROOT_DIR}/build"
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/spacesense-stage.XXXXXX")"
 STAGE_APP="${STAGE_DIR}/${APP_NAME}.app"
@@ -55,7 +55,7 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>121</string>
+    <string>122</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>

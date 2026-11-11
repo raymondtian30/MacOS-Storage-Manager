@@ -21,73 +21,93 @@ public struct SmartCleanupEngine: Sendable {
         "/.fseventsd"
     ]
 
+    private static let protectedPrefixesWithSlash: [String] = protectedPrefixes.map { $0 + "/" }
+    private static let homePath: String = cleanTrailingSlash(FileManager.default.homeDirectoryForCurrentUser.path)
+
+    private static let exactProtectedPaths: Set<String> = [
+        "/",
+        "/Applications",
+        "/Library",
+        "/Users",
+        "/Volumes",
+        "/private",
+        "/var",
+        "/opt",
+        "/cores",
+        homePath,
+        "\(homePath)/Desktop",
+        "\(homePath)/Documents",
+        "\(homePath)/Downloads",
+        "\(homePath)/Pictures",
+        "\(homePath)/Movies",
+        "\(homePath)/Music",
+        "\(homePath)/Library"
+    ]
+
+    private static let homeProtectedSubtrees: [String] = [
+        "\(homePath)/Library/Application Support",
+        "\(homePath)/Library/Keychains",
+        "\(homePath)/Library/Preferences",
+        "\(homePath)/Library/Containers",
+        "\(homePath)/Library/Group Containers",
+        "\(homePath)/Library/Mail",
+        "\(homePath)/Library/Messages",
+        "\(homePath)/Library/Safari",
+        "\(homePath)/Library/Calendars",
+        "\(homePath)/Library/Contacts",
+        "\(homePath)/Library/Photos",
+        "\(homePath)/.ssh",
+        "\(homePath)/.gnupg",
+        "\(homePath)/.aws",
+        "\(homePath)/.kube"
+    ]
+
+    private static let homeProtectedSubtreesWithSlash: [String] = homeProtectedSubtrees.map { $0 + "/" }
+    private static let mobileSyncBackupPrefix: String = "\(homePath)/Library/Application Support/MobileSync/Backup"
+
+    private static let installerExtensions: Set<String> = ["dmg", "pkg", "iso"]
+    private static let tempExtensions: Set<String> = ["log", "tmp", "temp", "cache"]
+    private static let archiveExtensions: Set<String> = ["zip", "tgz", "7z", "rar", "tar", "tbz2", "xz"]
+
     public init() {}
 
     public static func isProtectedSystemPath(_ path: String, resolveSymlinks: Bool = false) -> Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let exactProtected: Set<String> = [
-            "/",
-            "/Applications",
-            "/Library",
-            "/Users",
-            "/Volumes",
-            "/private",
-            "/var",
-            "/opt",
-            "/cores",
-            home,
-            "\(home)/Desktop",
-            "\(home)/Documents",
-            "\(home)/Downloads",
-            "\(home)/Pictures",
-            "\(home)/Movies",
-            "\(home)/Music",
-            "\(home)/Library"
-        ]
-
-        let homeProtectedSubtrees: [String] = [
-            "\(home)/Library/Application Support",
-            "\(home)/Library/Keychains",
-            "\(home)/Library/Preferences",
-            "\(home)/Library/Containers",
-            "\(home)/Library/Group Containers",
-            "\(home)/Library/Mail",
-            "\(home)/Library/Messages",
-            "\(home)/Library/Safari",
-            "\(home)/Library/Calendars",
-            "\(home)/Library/Contacts",
-            "\(home)/Library/Photos",
-            "\(home)/.ssh",
-            "\(home)/.gnupg",
-            "\(home)/.aws",
-            "\(home)/.kube"
-        ]
-
-        var candidates = [cleanTrailingSlash(path)]
+        let primary = cleanTrailingSlash(path)
+        if isSinglePathProtected(primary) {
+            return true
+        }
         if resolveSymlinks {
             let url = URL(fileURLWithPath: path)
-            candidates.append(url.standardizedFileURL.path)
-            candidates.append(url.resolvingSymlinksInPath().standardizedFileURL.path)
+            let standardized = cleanTrailingSlash(url.standardizedFileURL.path)
+            if standardized != primary && isSinglePathProtected(standardized) {
+                return true
+            }
+            let resolved = cleanTrailingSlash(url.resolvingSymlinksInPath().standardizedFileURL.path)
+            if resolved != standardized && resolved != primary && isSinglePathProtected(resolved) {
+                return true
+            }
         }
+        return false
+    }
 
-        for candidate in candidates {
-            if exactProtected.contains(candidate) {
+    private static func isSinglePathProtected(_ candidate: String) -> Bool {
+        if exactProtectedPaths.contains(candidate) {
+            return true
+        }
+        if candidate.contains("/.git/") || candidate.hasSuffix("/.git") {
+            return true
+        }
+        for i in protectedPrefixes.indices {
+            if candidate == protectedPrefixes[i] || candidate.hasPrefix(protectedPrefixesWithSlash[i]) {
                 return true
             }
-            if candidate.contains("/.git/") || candidate.hasSuffix("/.git") {
-                return true
+        }
+        if candidate.hasPrefix(homePath) {
+            if candidate.hasPrefix(mobileSyncBackupPrefix) {
+                return false
             }
-            for prefix in protectedPrefixes {
-                if candidate == prefix || candidate.hasPrefix(prefix + "/") {
-                    return true
-                }
-            }
-            for subtree in homeProtectedSubtrees {
-                // Allow MobileSync/Backup if explicitly reviewed, protect all other critical Library subtrees
-                if candidate.hasPrefix("\(home)/Library/Application Support/MobileSync/Backup") {
-                    continue
-                }
-                if candidate == subtree || candidate.hasPrefix(subtree + "/") {
+            for i in homeProtectedSubtrees.indices {
+                if candidate == homeProtectedSubtrees[i] || candidate.hasPrefix(homeProtectedSubtreesWithSlash[i]) {
                     return true
                 }
             }
@@ -111,22 +131,39 @@ public struct SmartCleanupEngine: Sendable {
         var candidates: [CleanupCandidate] = []
         var seenPaths: Set<String> = []
         let now = Date()
+        let minInstallerBytes: Int64 = 10 * 1024 * 1024
+        let minTempBytes: Int64 = 20 * 1024 * 1024
+        let minArchiveBytes: Int64 = 25 * 1024 * 1024
+        let minCandidateBytes = min(minInstallerBytes, largeFileThresholdBytes)
 
         // 1. Inspect scanned files for installers, archives, temp files, and unused large files
         if let scanResult {
             for file in scanResult.allFiles {
+                guard file.size >= minCandidateBytes else {
+                    continue
+                }
+
+                let ext = file.fileExtension
+                let isInstallerMatch = file.size >= minInstallerBytes && Self.installerExtensions.contains(ext)
+                let isTempMatch = file.size >= minTempBytes && Self.tempExtensions.contains(ext)
+                let isArchiveMatch = file.size >= minArchiveBytes && Self.archiveExtensions.contains(ext)
+                let isLargeMatch = file.size >= largeFileThresholdBytes
+
+                guard isInstallerMatch || isTempMatch || isArchiveMatch || isLargeMatch else {
+                    continue
+                }
+
                 let path = file.path
                 guard !Self.isProtectedSystemPath(path, resolveSymlinks: false),
                       !seenPaths.contains(path) else {
                     continue
                 }
 
-                let ext = file.fileExtension.lowercased()
                 let lowerPath = path.lowercased()
                 let daysUnused = file.daysSinceLastOpened(from: now)
 
                 // Disk Images & Package Installers (.dmg, .pkg, .iso) >= 10 MB
-                if ["dmg", "pkg", "iso"].contains(ext), file.size >= 10 * 1024 * 1024 {
+                if isInstallerMatch {
                     seenPaths.insert(path)
                     let isInDownloads = lowerPath.contains("/downloads/")
                     candidates.append(
@@ -147,36 +184,35 @@ public struct SmartCleanupEngine: Sendable {
                 }
 
                 // Large temporary / log files (.log, .tmp, .temp, .cache) >= 20 MB in safe scratch/log/download locations
-                let isSafeLogOrTempDir = lowerPath.contains("/logs/") ||
-                    lowerPath.contains("/caches/") ||
-                    lowerPath.contains("/tmp/") ||
-                    lowerPath.contains("/downloads/")
-                if ["log", "tmp", "temp", "cache"].contains(ext),
-                   isSafeLogOrTempDir,
-                   file.size >= 20 * 1024 * 1024 {
-                    seenPaths.insert(path)
-                    candidates.append(
-                        CleanupCandidate(
-                            kind: .largeTempFiles,
-                            title: "Log / Temp File: \(file.name)",
-                            whatWillBeRemoved: "Temporary or diagnostic log file '\(file.name)'",
-                            locationURL: file.url,
-                            sizeBytes: file.size,
-                            lastUsedDate: file.lastUsedDate,
-                            whyRecommended: "Large scratch and log files accumulate over time and are not required for normal app operation.",
-                            potentialConsequences: "Past diagnostic log entries in this file will be moved to Trash.",
-                            risk: .low,
-                            isSelected: true
+                if isTempMatch {
+                    let isSafeLogOrTempDir = lowerPath.contains("/logs/") ||
+                        lowerPath.contains("/caches/") ||
+                        lowerPath.contains("/tmp/") ||
+                        lowerPath.contains("/downloads/")
+                    if isSafeLogOrTempDir {
+                        seenPaths.insert(path)
+                        candidates.append(
+                            CleanupCandidate(
+                                kind: .largeTempFiles,
+                                title: "Log / Temp File: \(file.name)",
+                                whatWillBeRemoved: "Temporary or diagnostic log file '\(file.name)'",
+                                locationURL: file.url,
+                                sizeBytes: file.size,
+                                lastUsedDate: file.lastUsedDate,
+                                whyRecommended: "Large scratch and log files accumulate over time and are not required for normal app operation.",
+                                potentialConsequences: "Past diagnostic log entries in this file will be moved to Trash.",
+                                risk: .low,
+                                isSelected: true
+                            )
                         )
-                    )
-                    continue
+                        continue
+                    }
                 }
 
                 // Old Archives (.zip, .tgz, .7z, .rar, .tar) in Downloads unused for >= 30 days and >= 25 MB
-                if ["zip", "tgz", "7z", "rar", "tar", "tbz2", "xz"].contains(ext),
-                   lowerPath.contains("/downloads/"),
+                if isArchiveMatch,
                    daysUnused >= 30,
-                   file.size >= 25 * 1024 * 1024 {
+                   lowerPath.contains("/downloads/") {
                     seenPaths.insert(path)
                     candidates.append(
                         CleanupCandidate(
@@ -196,7 +232,7 @@ public struct SmartCleanupEngine: Sendable {
                 }
 
                 // Large files (>= largeFileThresholdBytes) that haven't been opened or used in >= unusedDaysThreshold days
-                if file.size >= largeFileThresholdBytes, daysUnused >= unusedDaysThreshold {
+                if isLargeMatch, daysUnused >= unusedDaysThreshold {
                     seenPaths.insert(path)
                     let isLowRiskLocation = lowerPath.contains("/downloads/") || lowerPath.contains("/movies/")
                     candidates.append(

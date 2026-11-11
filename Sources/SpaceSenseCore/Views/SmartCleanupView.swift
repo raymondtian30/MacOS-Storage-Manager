@@ -38,16 +38,25 @@ public struct SmartCleanupView: View {
         GeometryReader { geo in
             let isCompact = geo.size.width < 720
             VStack(alignment: .leading, spacing: 12) {
-                headerBar
-                modeSelectorBar
-
                 switch hubMode {
                 case .recommendations:
-                    recommendationsContent
+                    let candidates = filteredCandidates()
+                    let counts = selectedCandidateCounts(from: candidates)
+                    headerBar(selectedCount: counts.count, selectedBytes: counts.bytes)
+                    modeSelectorBar
+                    recommendationsContent(filtered: candidates)
                 case .largeFiles:
-                    largeFilesContent
+                    let files = filteredLargeFiles()
+                    let counts = selectedLargeFileCounts(from: files)
+                    headerBar(selectedCount: counts.count, selectedBytes: counts.bytes)
+                    modeSelectorBar
+                    largeFilesContent(files: files)
                 case .duplicates:
-                    duplicatesContent
+                    let groups = filteredDuplicateGroups()
+                    let counts = selectedDuplicateCounts(from: groups)
+                    headerBar(selectedCount: counts.count, selectedBytes: counts.bytes)
+                    modeSelectorBar
+                    duplicatesContent(groups: groups)
                 }
             }
             .padding(isCompact ? 14 : 20)
@@ -61,16 +70,15 @@ public struct SmartCleanupView: View {
         }
     }
 
-    private var headerBar: some View {
-        let activeSelection = currentActionSummary()
-        return ViewThatFits(in: .horizontal) {
+    private func headerBar(selectedCount: Int, selectedBytes: Int64) -> some View {
+        ViewThatFits(in: .horizontal) {
             HStack(spacing: 10) {
                 SectionHeaderBar(
                     title: "Delete Hub",
                     subtitle: "Unused large files (> \(appState.unusedFileDaysThreshold)d), duplicates, caches, and safe cleanup",
                     icon: NavigationSection.deleteHub.icon
                 )
-                headerActionButtons(activeSelection: activeSelection)
+                headerActionButtons(selectedCount: selectedCount, selectedBytes: selectedBytes)
             }
             VStack(alignment: .leading, spacing: 8) {
                 SectionHeaderBar(
@@ -78,12 +86,12 @@ public struct SmartCleanupView: View {
                     subtitle: "Unused large files (> \(appState.unusedFileDaysThreshold)d), duplicates, caches, and safe cleanup",
                     icon: NavigationSection.deleteHub.icon
                 )
-                headerActionButtons(activeSelection: activeSelection)
+                headerActionButtons(selectedCount: selectedCount, selectedBytes: selectedBytes)
             }
         }
     }
 
-    private func headerActionButtons(activeSelection: (urls: [URL], sizes: [URL: Int64], descriptions: [(name: String, path: String, size: Int64)], count: Int, bytes: Int64)) -> some View {
+    private func headerActionButtons(selectedCount: Int, selectedBytes: Int64) -> some View {
         HStack(spacing: 8) {
             Button {
                 Task {
@@ -108,7 +116,7 @@ public struct SmartCleanupView: View {
                 showingReviewSheet = true
             } label: {
                 Label(
-                    "Move \(activeSelection.count) to Trash (\(ByteFormatting.string(activeSelection.bytes)))",
+                    "Move \(selectedCount) to Trash (\(ByteFormatting.string(selectedBytes)))",
                     systemImage: "trash.fill"
                 )
                 .fontWeight(.semibold)
@@ -116,7 +124,7 @@ public struct SmartCleanupView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(SpaceSenseTheme.accent)
-            .disabled(activeSelection.count == 0)
+            .disabled(selectedCount == 0)
         }
     }
 
@@ -184,8 +192,8 @@ public struct SmartCleanupView: View {
 
     // MARK: - 1. Recommendations & Unused Large Files Mode
 
-    private var recommendationsContent: some View {
-        let filtered = filteredCandidates()
+    private func recommendationsContent(filtered: [CleanupCandidate]) -> some View {
+        let countsByKind = Dictionary(grouping: appState.cleanupCandidates, by: \.kind).mapValues(\.count)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -194,7 +202,7 @@ public struct SmartCleanupView: View {
                             selectedKindFilter = nil
                         }
                         ForEach(CleanupKind.allCases) { kind in
-                            let count = appState.cleanupCandidates.filter { $0.kind == kind }.count
+                            let count = countsByKind[kind] ?? 0
                             filterPill(title: "\(kind.rawValue) (\(count))", icon: kind.icon, isSelected: selectedKindFilter == kind) {
                                 selectedKindFilter = kind
                             }
@@ -355,8 +363,8 @@ public struct SmartCleanupView: View {
 
     // MARK: - 2. Large Files Mode (250 MB – 1 GB+)
 
-    private var largeFilesContent: some View {
-        let files = filteredLargeFiles()
+    private func largeFilesContent(files: [LargeFileItem]) -> some View {
+        let now = Date()
         return VStack(alignment: .leading, spacing: 10) {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) {
@@ -423,7 +431,7 @@ public struct SmartCleanupView: View {
                     )
                 } else {
                     List(files) { file in
-                        largeFileRow(file)
+                        largeFileRow(file, now: now)
                     }
                     .listStyle(.inset)
                 }
@@ -451,9 +459,9 @@ public struct SmartCleanupView: View {
         }
     }
 
-    private func largeFileRow(_ file: LargeFileItem) -> some View {
+    private func largeFileRow(_ file: LargeFileItem, now: Date) -> some View {
         let isSelected = selectedLargeFileIDs.contains(file.id)
-        let daysUnused = file.daysSinceLastOpened()
+        let daysUnused = file.daysSinceLastOpened(from: now)
         let isStale = daysUnused >= appState.unusedFileDaysThreshold
 
         return HStack(spacing: 10) {
@@ -473,7 +481,7 @@ public struct SmartCleanupView: View {
             .toggleStyle(.checkbox)
             .labelsHidden()
 
-            Image(nsImage: NSWorkspace.shared.icon(forFile: file.path))
+            Image(nsImage: FileIconCache.icon(forPath: file.path, fileExtension: file.fileExtension))
                 .resizable()
                 .frame(width: 22, height: 22)
 
@@ -560,9 +568,8 @@ public struct SmartCleanupView: View {
 
     // MARK: - 3. Exact Duplicates Mode (SHA-256)
 
-    private var duplicatesContent: some View {
-        let groups = filteredDuplicateGroups()
-        return VStack(alignment: .leading, spacing: 10) {
+    private func duplicatesContent(groups: [DuplicateGroup]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 TextField("Filter duplicate filenames or paths…", text: $searchText)
                     .textFieldStyle(.roundedBorder)
@@ -580,17 +587,7 @@ public struct SmartCleanupView: View {
                 Spacer(minLength: 4)
 
                 if appState.isFindingDuplicates {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Hashing (\(appState.duplicateProgress.processed)/\(appState.duplicateProgress.total))…")
-                            .font(.caption)
-                            .lineLimit(1)
-                        Button("Stop") {
-                            appState.cancelDuplicateScan()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
+                    DuplicateScanProgressStatusView(appState: appState)
                 } else {
                     Button("Re-scan Duplicates") {
                         Task { await appState.runDuplicateScan() }
@@ -753,26 +750,36 @@ public struct SmartCleanupView: View {
         let source = scan.allFiles.isEmpty ? scan.largeFiles : scan.allFiles
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let ext = extensionFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: ".", with: "")
+        let now = Date()
+        let minUnusedDays = appState.unusedFileDaysThreshold
 
-        let filtered = source.filter { item in
-            guard item.size >= minBytes else { return false }
-            if onlyUnusedLargeFiles && item.daysSinceLastOpened() < appState.unusedFileDaysThreshold {
-                return false
+        // Because `source` is sorted by size descending, stop immediately once size < minBytes
+        let sizeSlice = source.prefix(while: { $0.size >= minBytes })
+        let hasExtraFilters = onlyUnusedLargeFiles || !q.isEmpty || !ext.isEmpty
+
+        let filtered: [LargeFileItem]
+        if hasExtraFilters {
+            filtered = sizeSlice.filter { item in
+                if onlyUnusedLargeFiles && item.daysSinceLastOpened(from: now) < minUnusedDays {
+                    return false
+                }
+                if !ext.isEmpty && item.fileExtension != ext {
+                    return false
+                }
+                if !q.isEmpty && !item.name.lowercased().contains(q) && !item.path.lowercased().contains(q) {
+                    return false
+                }
+                return true
             }
-            if !q.isEmpty && !item.name.lowercased().contains(q) && !item.path.lowercased().contains(q) {
-                return false
-            }
-            if !ext.isEmpty && item.fileExtension != ext {
-                return false
-            }
-            return true
+        } else {
+            filtered = Array(sizeSlice)
         }
 
         switch largeFileSortOrder {
         case .sizeDesc:
-            return filtered.sorted { $0.size > $1.size }
+            return filtered
         case .unusedDesc:
-            return filtered.sorted { $0.daysSinceLastOpened() > $1.daysSinceLastOpened() }
+            return filtered.sorted { ($0.lastUsedDate ?? .distantPast) < ($1.lastUsedDate ?? .distantPast) }
         case .nameAsc:
             return filtered.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         }
@@ -784,6 +791,39 @@ public struct SmartCleanupView: View {
         return appState.duplicateGroups.filter { group in
             group.files.contains { $0.name.lowercased().contains(q) || $0.path.lowercased().contains(q) }
         }
+    }
+
+    private func selectedCandidateCounts(from candidates: [CleanupCandidate]) -> (count: Int, bytes: Int64) {
+        var count = 0
+        var bytes: Int64 = 0
+        for item in candidates where item.isSelected {
+            count += 1
+            bytes += item.sizeBytes
+        }
+        return (count, bytes)
+    }
+
+    private func selectedLargeFileCounts(from files: [LargeFileItem]) -> (count: Int, bytes: Int64) {
+        guard !selectedLargeFileIDs.isEmpty else { return (0, 0) }
+        var count = 0
+        var bytes: Int64 = 0
+        for item in files where selectedLargeFileIDs.contains(item.id) {
+            count += 1
+            bytes += item.size
+        }
+        return (count, bytes)
+    }
+
+    private func selectedDuplicateCounts(from groups: [DuplicateGroup]) -> (count: Int, bytes: Int64) {
+        var count = 0
+        var bytes: Int64 = 0
+        for group in groups {
+            for file in group.files where file.isMarkedForRemoval {
+                count += 1
+                bytes += file.size
+            }
+        }
+        return (count, bytes)
     }
 
     private func currentActionSummary() -> (urls: [URL], sizes: [URL: Int64], descriptions: [(name: String, path: String, size: Int64)], count: Int, bytes: Int64) {
@@ -942,5 +982,53 @@ private struct DeleteHubPreviewModal: View {
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: 4096) else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+}
+
+private struct DuplicateScanProgressStatusView: View {
+    let appState: AppState
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text("Hashing (\(appState.duplicateProgress.processed)/\(appState.duplicateProgress.total))…")
+                .font(.caption)
+                .lineLimit(1)
+            Button("Stop") {
+                appState.cancelDuplicateScan()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+}
+
+@MainActor
+private enum FileIconCache {
+    private static var extensionIcons: [String: NSImage] = [:]
+    private static var pathIcons: [String: NSImage] = [:]
+
+    static func icon(forPath path: String, fileExtension: String) -> NSImage {
+        let ext = fileExtension.lowercased()
+        if !ext.isEmpty && ext != "app" {
+            if let cached = extensionIcons[ext] {
+                return cached
+            }
+            let image = NSWorkspace.shared.icon(forFile: path)
+            if extensionIcons.count > 256 {
+                extensionIcons.removeAll(keepingCapacity: true)
+            }
+            extensionIcons[ext] = image
+            return image
+        }
+        if let cached = pathIcons[path] {
+            return cached
+        }
+        let image = NSWorkspace.shared.icon(forFile: path)
+        if pathIcons.count > 256 {
+            pathIcons.removeAll(keepingCapacity: true)
+        }
+        pathIcons[path] = image
+        return image
     }
 }

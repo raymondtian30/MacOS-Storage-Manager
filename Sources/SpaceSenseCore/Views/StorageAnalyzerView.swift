@@ -1,5 +1,11 @@
 import SwiftUI
 
+@MainActor
+@Observable
+final class AnalyzerHoverState {
+    var hoveredNodeID: String?
+}
+
 public struct StorageAnalyzerView: View {
     @Bindable var appState: AppState
 
@@ -14,7 +20,7 @@ public struct StorageAnalyzerView: View {
     @State private var sortOrder: SortOrder = .sizeDesc
     @State private var fileTypeFilter: String = ""
     @State private var searchText: String = ""
-    @State private var hoveredNodeID: String?
+    @State private var hoverState = AnalyzerHoverState()
 
     public init(appState: AppState) {
         self.appState = appState
@@ -28,21 +34,22 @@ public struct StorageAnalyzerView: View {
                 topBar
 
                 if let currentNode = appState.analyzerCurrentNode {
+                    let visibleChildren = filteredAndSortedChildren(for: currentNode)
                     breadcrumbBar(currentNode: currentNode)
 
                     if useVerticalSplit {
                         VSplitView {
-                            treemapPanel(for: currentNode)
+                            treemapPanel(items: visibleChildren)
                                 .frame(minHeight: 110, maxHeight: .infinity)
-                            directoryListPanel(for: currentNode)
+                            directoryListPanel(for: currentNode, children: visibleChildren)
                                 .frame(minHeight: 120, maxHeight: .infinity)
                         }
                     } else {
                         HSplitView {
-                            treemapPanel(for: currentNode)
+                            treemapPanel(items: visibleChildren)
                                 .frame(minWidth: 190, maxWidth: .infinity, maxHeight: .infinity)
 
-                            directoryListPanel(for: currentNode)
+                            directoryListPanel(for: currentNode, children: visibleChildren)
                                 .frame(minWidth: 220, maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
@@ -161,9 +168,8 @@ public struct StorageAnalyzerView: View {
         }
     }
 
-    private func treemapPanel(for node: FileNode) -> some View {
-        let items = filteredAndSortedChildren(for: node)
-        return SurfaceCard(padding: 12) {
+    private func treemapPanel(items: [FileNode]) -> some View {
+        SurfaceCard(padding: 12) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Storage Treemap")
@@ -186,7 +192,7 @@ public struct StorageAnalyzerView: View {
                 } else {
                     SquarifiedTreemapView(
                         items: Array(items.prefix(28)),
-                        hoveredID: $hoveredNodeID
+                        hoverState: hoverState
                     ) { tapped in
                         if tapped.isDirectory && !tapped.children.isEmpty {
                             appState.drillDown(to: tapped)
@@ -200,8 +206,7 @@ public struct StorageAnalyzerView: View {
         }
     }
 
-    private func directoryListPanel(for node: FileNode) -> some View {
-        let children = filteredAndSortedChildren(for: node)
+    private func directoryListPanel(for node: FileNode, children: [FileNode]) -> some View {
         let parentTotal = max(node.size, 1)
 
         return SurfaceCard(padding: 12) {
@@ -227,81 +232,12 @@ public struct StorageAnalyzerView: View {
                 }
 
                 List(children) { item in
-                    let isHovered = hoveredNodeID == item.id
-                    HStack(spacing: 8) {
-                        Image(systemName: item.isDirectory ? "folder.fill" : item.category.icon)
-                            .foregroundStyle(item.isDirectory ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
-                            .frame(width: 18)
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(item.name)
-                                    .font(.subheadline.weight(.medium))
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.85)
-                                if !item.isAccessible {
-                                    Text("Restricted")
-                                        .font(.caption2)
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 1)
-                                        .background(SpaceSenseTheme.slate.opacity(0.2), in: Capsule())
-                                }
-                            }
-                            Text(item.url.path)
-                                .font(.caption2)
-                                .foregroundStyle(SpaceSenseTheme.slate)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .help(item.url.path)
-                        }
-
-                        Spacer(minLength: 4)
-
-                        VStack(alignment: .trailing, spacing: 2) {
-                            Text(ByteFormatting.string(item.size))
-                                .font(.caption.monospacedDigit().weight(.semibold))
-                            ProgressView(value: min(1.0, max(0.0, Double(item.size) / Double(parentTotal))))
-                                .tint(item.isDirectory ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
-                                .frame(width: 56)
-                        }
-
-                        Button {
-                            appState.revealInFinder(item.url)
-                        } label: {
-                            Image(systemName: "folder")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Reveal in Finder")
-                    }
-                    .padding(.vertical, 3)
-                    .padding(.horizontal, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(isHovered ? SpaceSenseTheme.accent.opacity(0.14) : Color.clear)
+                    AnalyzerDirectoryRowView(
+                        item: item,
+                        parentTotal: parentTotal,
+                        hoverState: hoverState,
+                        appState: appState
                     )
-                    .contentShape(Rectangle())
-                    .onHover { hovering in
-                        if hovering {
-                            hoveredNodeID = item.id
-                        } else if hoveredNodeID == item.id {
-                            hoveredNodeID = nil
-                        }
-                    }
-                    .onTapGesture {
-                        if item.isDirectory && !item.children.isEmpty {
-                            appState.drillDown(to: item)
-                        } else {
-                            appState.revealInFinder(item.url)
-                        }
-                    }
-                    .contextMenu {
-                        if item.isDirectory && !item.children.isEmpty {
-                            Button("Inspect Subfolder") { appState.drillDown(to: item) }
-                        }
-                        Button("Reveal in Finder") { appState.revealInFinder(item.url) }
-                        Button("Open") { appState.openFile(item.url) }
-                        Button("Copy Path") { appState.copyPathToClipboard(item.url.path) }
-                    }
                 }
                 .listStyle(.inset)
             }
@@ -379,27 +315,38 @@ public struct StorageAnalyzerView: View {
     private func filteredAndSortedChildren(for node: FileNode) -> [FileNode] {
         let trimmedSearch = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let trimmedExt = fileTypeFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: ".", with: "")
+        let categoryFilter = appState.analyzerCategoryFilter
 
-        let filtered = node.children.filter { child in
-            if let cat = appState.analyzerCategoryFilter, child.category != cat && !child.isDirectory {
-                return false
-            }
-            if !trimmedExt.isEmpty && !child.isDirectory && child.fileExtension.lowercased() != trimmedExt {
-                return false
-            }
-            if !trimmedSearch.isEmpty {
-                let matchesName = child.name.lowercased().contains(trimmedSearch)
-                let matchesPath = child.url.path.lowercased().contains(trimmedSearch)
-                if !matchesName && !matchesPath {
+        let hasFilters = (categoryFilter != nil) || !trimmedExt.isEmpty || !trimmedSearch.isEmpty
+        if !hasFilters && sortOrder == .sizeDesc {
+            return node.children
+        }
+
+        let filtered: [FileNode]
+        if hasFilters {
+            filtered = node.children.filter { child in
+                if let cat = categoryFilter, child.category != cat && !child.isDirectory {
                     return false
                 }
+                if !trimmedExt.isEmpty && !child.isDirectory && child.fileExtension != trimmedExt {
+                    return false
+                }
+                if !trimmedSearch.isEmpty {
+                    let matchesName = child.name.lowercased().contains(trimmedSearch)
+                    let matchesPath = child.id.lowercased().contains(trimmedSearch)
+                    if !matchesName && !matchesPath {
+                        return false
+                    }
+                }
+                return true
             }
-            return true
+        } else {
+            filtered = node.children
         }
 
         switch sortOrder {
         case .sizeDesc:
-            return filtered.sorted { $0.size > $1.size }
+            return filtered
         case .modifiedDesc:
             return filtered.sorted { ($0.modificationDate ?? .distantPast) > ($1.modificationDate ?? .distantPast) }
         case .nameAsc:
@@ -408,9 +355,105 @@ public struct StorageAnalyzerView: View {
     }
 }
 
+private struct AnalyzerDirectoryRowView: View {
+    let item: FileNode
+    let parentTotal: Int64
+    let hoverState: AnalyzerHoverState
+    let appState: AppState
+
+    var body: some View {
+        let isHovered = hoverState.hoveredNodeID == item.id
+        let fraction = CGFloat(min(1.0, max(0.0, Double(item.size) / Double(parentTotal))))
+        let barColor = item.isDirectory ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent
+
+        HStack(spacing: 8) {
+            Image(systemName: item.isDirectory ? "folder.fill" : item.category.icon)
+                .foregroundStyle(barColor)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(item.name)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    if !item.isAccessible {
+                        Text("Restricted")
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(SpaceSenseTheme.slate.opacity(0.2), in: Capsule())
+                    }
+                }
+                Text(item.id)
+                    .font(.caption2)
+                    .foregroundStyle(SpaceSenseTheme.slate)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(item.id)
+            }
+
+            Spacer(minLength: 4)
+
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(ByteFormatting.string(item.size))
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(SpaceSenseTheme.slate.opacity(0.18))
+                        .frame(width: 56, height: 5)
+                    Capsule()
+                        .fill(barColor)
+                        .frame(width: max(fraction > 0 ? 3 : 0, 56 * fraction), height: 5)
+                }
+            }
+
+            Button {
+                appState.revealInFinder(item.url)
+            } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.borderless)
+            .help("Reveal in Finder")
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isHovered ? SpaceSenseTheme.accent.opacity(0.14) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering {
+                if hoverState.hoveredNodeID != item.id {
+                    hoverState.hoveredNodeID = item.id
+                }
+            } else if hoverState.hoveredNodeID == item.id {
+                hoverState.hoveredNodeID = nil
+            }
+        }
+        .onTapGesture {
+            if item.isDirectory && !item.children.isEmpty {
+                appState.drillDown(to: item)
+            } else {
+                appState.revealInFinder(item.url)
+            }
+        }
+        .contextMenu {
+            if item.isDirectory && !item.children.isEmpty {
+                Button("Inspect Subfolder") { appState.drillDown(to: item) }
+            }
+            Button("Reveal in Finder") { appState.revealInFinder(item.url) }
+            Button("Open") { appState.openFile(item.url) }
+            Button("Copy Path") { appState.copyPathToClipboard(item.id) }
+        }
+    }
+}
+
 public struct SquarifiedTreemapView: View {
     public let items: [FileNode]
     @Binding public var hoveredID: String?
+    private let hoverState: AnalyzerHoverState?
     public let onSelect: (FileNode) -> Void
 
     public init(
@@ -420,6 +463,18 @@ public struct SquarifiedTreemapView: View {
     ) {
         self.items = items
         self._hoveredID = hoveredID
+        self.hoverState = nil
+        self.onSelect = onSelect
+    }
+
+    init(
+        items: [FileNode],
+        hoverState: AnalyzerHoverState,
+        onSelect: @escaping (FileNode) -> Void
+    ) {
+        self.items = items
+        self._hoveredID = .constant(nil)
+        self.hoverState = hoverState
         self.onSelect = onSelect
     }
 
@@ -428,59 +483,13 @@ public struct SquarifiedTreemapView: View {
             let rects = computeTreemapRects(items: items, in: CGRect(origin: .zero, size: geo.size))
             ZStack(alignment: .topLeading) {
                 ForEach(rects, id: \.node.id) { entry in
-                    let isHovered = hoveredID == entry.node.id
-                    let baseColor = entry.node.isDirectory ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent
-                    Button {
-                        onSelect(entry.node)
-                    } label: {
-                        ZStack(alignment: .topLeading) {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(
-                                    LinearGradient(
-                                        colors: [
-                                            baseColor.opacity(isHovered ? 0.88 : 0.68),
-                                            baseColor.opacity(isHovered ? 0.62 : 0.42)
-                                        ],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .strokeBorder(Color.white.opacity(isHovered ? 0.65 : 0.16), lineWidth: isHovered ? 1.5 : 1)
-
-                            if entry.rect.width > 46 && entry.rect.height > 28 {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: entry.node.isDirectory ? "folder.fill" : "doc.fill")
-                                            .font(.caption2)
-                                        Text(entry.node.name)
-                                            .font(.caption.weight(.semibold))
-                                            .lineLimit(1)
-                                            .minimumScaleFactor(0.7)
-                                    }
-                                    if entry.rect.height > 40 {
-                                        Text(ByteFormatting.string(entry.node.size))
-                                            .font(.caption2.monospacedDigit())
-                                            .opacity(0.9)
-                                            .lineLimit(1)
-                                    }
-                                }
-                                .foregroundStyle(.white)
-                                .padding(4)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .frame(width: max(0, entry.rect.width - 2), height: max(0, entry.rect.height - 2))
-                    .position(x: entry.rect.midX, y: entry.rect.midY)
-                    .onHover { hovering in
-                        if hovering {
-                            hoveredID = entry.node.id
-                        } else if hoveredID == entry.node.id {
-                            hoveredID = nil
-                        }
-                    }
-                    .help("\(entry.node.name) — \(ByteFormatting.string(entry.node.size))")
+                    TreemapCellView(
+                        node: entry.node,
+                        rect: entry.rect,
+                        hoverState: hoverState,
+                        hoveredIDBinding: $hoveredID,
+                        onSelect: onSelect
+                    )
                 }
             }
         }
@@ -494,46 +503,142 @@ public struct SquarifiedTreemapView: View {
     private func computeTreemapRects(items: [FileNode], in bounds: CGRect) -> [LayoutEntry] {
         let positive = items.filter { $0.size > 0 }
         guard !positive.isEmpty, bounds.width > 10, bounds.height > 10 else { return [] }
-        return sliceAndDice(positive, in: bounds, horizontal: bounds.width >= bounds.height)
+        var output: [LayoutEntry] = []
+        output.reserveCapacity(positive.count)
+        sliceAndDice(positive[...], in: bounds, horizontal: bounds.width >= bounds.height, into: &output)
+        return output
     }
 
-    private func sliceAndDice(_ nodes: [FileNode], in rect: CGRect, horizontal: Bool) -> [LayoutEntry] {
-        guard !nodes.isEmpty, rect.width > 2, rect.height > 2 else { return [] }
-        if nodes.count == 1 {
-            return [LayoutEntry(node: nodes[0], rect: rect)]
+    private func sliceAndDice(
+        _ nodes: ArraySlice<FileNode>,
+        in rect: CGRect,
+        horizontal: Bool,
+        into output: inout [LayoutEntry]
+    ) {
+        guard !nodes.isEmpty, rect.width > 2, rect.height > 2 else { return }
+        if nodes.count == 1, let first = nodes.first {
+            output.append(LayoutEntry(node: first, rect: rect))
+            return
         }
 
-        let total = nodes.reduce(Int64(0)) { $0 + max($1.size, 1) }
-        guard total > 0 else { return [] }
+        var total: Int64 = 0
+        for node in nodes {
+            total += max(node.size, 1)
+        }
+        guard total > 0 else { return }
 
         var running: Int64 = 0
-        var splitIndex = 1
+        var leftSum: Int64 = 0
+        var splitIndex = nodes.startIndex + 1
         let half = total / 2
-        for (idx, node) in nodes.enumerated() {
-            running += max(node.size, 1)
+
+        for idx in nodes.indices {
+            let weight = max(nodes[idx].size, 1)
+            running += weight
             if running >= half {
-                splitIndex = max(1, min(nodes.count - 1, idx + 1))
+                if idx < nodes.endIndex - 1 {
+                    splitIndex = idx + 1
+                    leftSum = running
+                } else {
+                    splitIndex = nodes.endIndex - 1
+                    leftSum = running - weight
+                }
                 break
             }
         }
 
-        let leftNodes = Array(nodes[0..<splitIndex])
-        let rightNodes = Array(nodes[splitIndex..<nodes.count])
-        let leftSum = leftNodes.reduce(Int64(0)) { $0 + max($1.size, 1) }
+        let leftNodes = nodes[nodes.startIndex..<splitIndex]
+        let rightNodes = nodes[splitIndex..<nodes.endIndex]
         let ratio = CGFloat(Double(leftSum) / Double(total))
 
         if horizontal {
             let leftWidth = rect.width * ratio
             let r1 = CGRect(x: rect.minX, y: rect.minY, width: leftWidth, height: rect.height)
             let r2 = CGRect(x: rect.minX + leftWidth, y: rect.minY, width: max(0, rect.width - leftWidth), height: rect.height)
-            return sliceAndDice(leftNodes, in: r1, horizontal: !horizontal)
-                + sliceAndDice(rightNodes, in: r2, horizontal: !horizontal)
+            sliceAndDice(leftNodes, in: r1, horizontal: !horizontal, into: &output)
+            sliceAndDice(rightNodes, in: r2, horizontal: !horizontal, into: &output)
         } else {
             let topHeight = rect.height * ratio
             let r1 = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: topHeight)
             let r2 = CGRect(x: rect.minX, y: rect.minY + topHeight, width: rect.width, height: max(0, rect.height - topHeight))
-            return sliceAndDice(leftNodes, in: r1, horizontal: !horizontal)
-                + sliceAndDice(rightNodes, in: r2, horizontal: !horizontal)
+            sliceAndDice(leftNodes, in: r1, horizontal: !horizontal, into: &output)
+            sliceAndDice(rightNodes, in: r2, horizontal: !horizontal, into: &output)
         }
+    }
+}
+
+private struct TreemapCellView: View {
+    let node: FileNode
+    let rect: CGRect
+    let hoverState: AnalyzerHoverState?
+    @Binding var hoveredIDBinding: String?
+    let onSelect: (FileNode) -> Void
+
+    var body: some View {
+        let isHovered = (hoverState?.hoveredNodeID ?? hoveredIDBinding) == node.id
+        let baseColor = node.isDirectory ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent
+        let formattedSize = ByteFormatting.string(node.size)
+
+        Button {
+            onSelect(node)
+        } label: {
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                baseColor.opacity(isHovered ? 0.88 : 0.68),
+                                baseColor.opacity(isHovered ? 0.62 : 0.42)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(Color.white.opacity(isHovered ? 0.65 : 0.16), lineWidth: isHovered ? 1.5 : 1)
+
+                if rect.width > 46 && rect.height > 28 {
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 3) {
+                            Image(systemName: node.isDirectory ? "folder.fill" : "doc.fill")
+                                .font(.caption2)
+                            Text(node.name)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                        }
+                        if rect.height > 40 {
+                            Text(formattedSize)
+                                .font(.caption2.monospacedDigit())
+                                .opacity(0.9)
+                                .lineLimit(1)
+                        }
+                    }
+                    .foregroundStyle(.white)
+                    .padding(4)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .frame(width: max(0, rect.width - 2), height: max(0, rect.height - 2))
+        .position(x: rect.midX, y: rect.midY)
+        .onHover { hovering in
+            if let hoverState {
+                if hovering {
+                    if hoverState.hoveredNodeID != node.id {
+                        hoverState.hoveredNodeID = node.id
+                    }
+                } else if hoverState.hoveredNodeID == node.id {
+                    hoverState.hoveredNodeID = nil
+                }
+            } else {
+                if hovering {
+                    hoveredIDBinding = node.id
+                } else if hoveredIDBinding == node.id {
+                    hoveredIDBinding = nil
+                }
+            }
+        }
+        .help("\(node.name) — \(formattedSize)")
     }
 }
