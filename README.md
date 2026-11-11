@@ -1,6 +1,6 @@
 # SpaceSense — AI-Powered macOS Storage Manager
 
-**Current Version:** `v1.0.1`
+**Current Version:** `v1.1.0`
 
 SpaceSense is a native macOS Dock application built with Swift and SwiftUI for Apple Silicon Macs (macOS 14+). It helps users understand, analyze, visualize, organize, and safely reclaim disk space on their Macs using local filesystem telemetry, cryptographic SHA-256 duplicate detection, SQLite storage history, and an optional Google Gemini AI assistant.
 
@@ -34,12 +34,13 @@ SpaceSense is a native macOS Dock application built with Swift and SwiftUI for A
 swift run SpaceSense
 ```
 
-### 2. Package Standalone Native `SpaceSense.app` Bundle
+### 2. Package & Install Standalone Native `SpaceSense.app` Bundle
 ```bash
 chmod +x scripts/bundle-app.sh
-./scripts/bundle-app.sh
-open build/SpaceSense.app
+./scripts/bundle-app.sh --install
+open /Applications/SpaceSense.app
 ```
+This builds the release binary, generates the Retina `AppIcon.icns`, signs `SpaceSense.app` in a clean staging folder, installs `/Applications/SpaceSense.app`, and creates distributable `build/SpaceSense-v1.1.0.dmg` and `build/SpaceSense-v1.1.0-macOS-arm64.zip` archives.
 
 ### 3. Run Automated Test Suite
 ```bash
@@ -54,6 +55,7 @@ swift test --enable-swift-testing --disable-xctest
 
 ## Version History
 
+- **`v1.1.0`** — Added automated Retina `.icns` icon generation (`AppIcon.icns`), clean-staged code signing, one-step `/Applications/SpaceSense.app` installer, and `.dmg` + `.zip` release packaging.
 - **`v1.0.1`** — Hardened logical-size duplicate hashing, hard-link deduplication, container-safe Trash cleanup, SQLite latest-snapshot ordering, Gemini `x-goog-api-key` header & role-ordering, and UI/UX polish from 4-agent code review.
 - **`v1.0.0`** — Added comprehensive automated XCTest suite, standalone `SpaceSense.app` bundle packaging script, and production documentation.
 - **`v0.4.0`** — Added SQLite Storage History with Swift Charts, macOS Keychain API credential storage, Gemini AI Storage Assistant with telemetry inspector, Settings & Privacy controls, and full 9-section native macOS window navigation.
