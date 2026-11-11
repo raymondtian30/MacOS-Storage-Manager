@@ -100,19 +100,17 @@ struct SpaceSenseApp: App {
         .commands {
             CommandMenu("Storage") {
                 Button("Scan Current Folder") {
-                    appState.startScan()
+                    appState.requestStartScan()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
-                .disabled(appState.isScanning)
 
                 Button("Choose Folder to Scan…") {
                     appState.chooseDirectoryAndScan()
                 }
                 .keyboardShortcut("o", modifiers: [.command])
-                .disabled(appState.isScanning)
 
                 if appState.isScanning {
-                    Button("Cancel Active Scan") {
+                    Button("Stop Active Scan") {
                         appState.cancelScan()
                     }
                     .keyboardShortcut(".", modifiers: [.command])

@@ -11,13 +11,6 @@ public struct OverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 headerRow
-
-                if appState.isScanning {
-                    ScanProgressBanner(progress: appState.scanProgress) {
-                        appState.cancelScan()
-                    }
-                }
-
                 topMetricsGrid
                 storageBarSection
 
@@ -34,7 +27,7 @@ public struct OverviewView: View {
         HStack(alignment: .center, spacing: 16) {
             SectionHeaderBar(
                 title: "Storage Overview",
-                subtitle: "Real-time disk telemetry for \(appState.volumeStats.volumeName)",
+                subtitle: "Disk telemetry for \(appState.volumeStats.volumeName)",
                 icon: NavigationSection.overview.icon
             )
 
@@ -45,20 +38,15 @@ public struct OverviewView: View {
                     Label("Choose Folder…", systemImage: "folder.badge.plus")
                 }
                 .buttonStyle(.bordered)
-                .disabled(appState.isScanning)
 
                 Button {
-                    appState.startScan()
+                    appState.requestStartScan(at: FileManager.default.homeDirectoryForCurrentUser)
                 } label: {
-                    Label(
-                        appState.isScanning ? "Scanning…" : "Start Storage Scan",
-                        systemImage: "play.fill"
-                    )
-                    .fontWeight(.semibold)
+                    Label("Scan Home Directory", systemImage: "play.fill")
+                        .fontWeight(.semibold)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(SpaceSenseTheme.accent)
-                .disabled(appState.isScanning)
             }
         }
     }
@@ -78,32 +66,33 @@ public struct OverviewView: View {
             spacing: 14
         ) {
             MetricCardView(
-                title: "Total Disk Capacity",
+                title: "Total Capacity",
                 value: ByteFormatting.string(stats.totalBytes),
                 subtitle: "Volume: \(stats.volumeName)",
                 icon: "internaldrive.fill",
-                tint: SpaceSenseTheme.accent
+                tint: SpaceSenseTheme.slate
             )
             MetricCardView(
-                title: "Used Storage (\(utilizationText))",
+                title: "Used (\(utilizationText))",
                 value: ByteFormatting.string(stats.usedBytes),
                 subtitle: "Last scan: \(lastScanText)",
                 icon: "chart.pie.fill",
-                tint: stats.utilizationPercentage > 85 ? SpaceSenseTheme.danger : SpaceSenseTheme.warning
+                tint: SpaceSenseTheme.accent
             )
             MetricCardView(
-                title: "Available Storage",
+                title: "Available Space",
                 value: ByteFormatting.string(stats.availableBytes),
-                subtitle: "Free purgable-aware capacity",
+                subtitle: "Purgeable-aware capacity",
                 icon: "checkmark.shield.fill",
-                tint: SpaceSenseTheme.secondaryAccent
+                tint: SpaceSenseTheme.secondaryAccent,
+                tooltip: "Includes APFS purgeable space that macOS automatically frees when applications request disk storage."
             )
             MetricCardView(
-                title: "Potentially Reclaimable",
+                title: "Delete Hub Reclaimable",
                 value: ByteFormatting.string(appState.totalReclaimableBytes),
-                subtitle: "\(appState.cleanupCandidates.count) safe cleanup items",
-                icon: "sparkles",
-                tint: .purple
+                subtitle: "\(appState.cleanupCandidates.count) reviewable items",
+                icon: "trash.slash.fill",
+                tint: SpaceSenseTheme.secondaryAccent
             )
         }
     }
@@ -118,17 +107,17 @@ public struct OverviewView: View {
                         if let result = appState.latestScanResult {
                             Text("Measured in \(result.rootURL.path) (\(ByteFormatting.string(result.rootNode.size)) across \(result.totalFilesScanned.formatted()) files)")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(SpaceSenseTheme.slate)
                         } else {
-                            Text("Run a scan on your Home folder or another directory to break down file categories. System Data probes are shown below.")
+                            Text("Click 'Scan Home Directory' to measure category sizes across your files.")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(SpaceSenseTheme.slate)
                         }
                     }
                     Spacer()
                     Text("\(String(format: "%.1f%%", appState.volumeStats.utilizationPercentage)) Used")
                         .font(.subheadline.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SpaceSenseTheme.slate)
                 }
 
                 GeometryReader { geo in
@@ -143,14 +132,14 @@ public struct OverviewView: View {
                         }
                         Spacer(minLength: 0)
                     }
-                    .frame(height: 18)
+                    .frame(height: 16)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.primary.opacity(0.08))
+                            .fill(SpaceSenseTheme.slate.opacity(0.15))
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
-                .frame(height: 18)
+                .frame(height: 16)
 
                 LazyVGrid(
                     columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
@@ -165,7 +154,7 @@ public struct OverviewView: View {
                             HStack(spacing: 10) {
                                 Circle()
                                     .fill(category.color)
-                                    .frame(width: 10, height: 10)
+                                    .frame(width: 9, height: 9)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(category.rawValue)
                                         .font(.caption.weight(.semibold))
@@ -173,14 +162,14 @@ public struct OverviewView: View {
                                         .lineLimit(1)
                                     Text(ByteFormatting.string(bytes))
                                         .font(.caption2.monospacedDigit())
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(SpaceSenseTheme.slate)
                                 }
                                 Spacer()
                             }
                             .padding(8)
                             .background(
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(Color.primary.opacity(0.04))
+                                    .fill(SpaceSenseTheme.slate.opacity(0.08))
                             )
                         }
                         .buttonStyle(.plain)
@@ -194,11 +183,11 @@ public struct OverviewView: View {
         SurfaceCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("Recently Detected Large Files")
+                    Text("Largest Detected Files")
                         .font(.headline)
                     Spacer()
-                    Button("View All") {
-                        appState.selectedSection = .largeFiles
+                    Button("Open Delete Hub") {
+                        appState.selectedSection = .deleteHub
                     }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -208,15 +197,15 @@ public struct OverviewView: View {
                     ForEach(files.prefix(7)) { file in
                         HStack(spacing: 10) {
                             Image(systemName: file.category.icon)
-                                .foregroundStyle(file.category.color)
+                                .foregroundStyle(SpaceSenseTheme.accent)
                                 .frame(width: 22)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(file.name)
                                     .font(.subheadline.weight(.medium))
                                     .lineLimit(1)
-                                Text(file.path)
+                                Text("Last opened \(file.daysSinceLastOpened())d ago • \(file.path)")
                                     .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(SpaceSenseTheme.slate)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
@@ -226,7 +215,7 @@ public struct OverviewView: View {
                             Button {
                                 appState.revealInFinder(file.url)
                             } label: {
-                                Image(systemName: "magnifyingglass.circle")
+                                Image(systemName: "folder")
                             }
                             .buttonStyle(.borderless)
                             .help("Reveal in Finder")
@@ -236,13 +225,12 @@ public struct OverviewView: View {
                     }
                 } else {
                     VStack(spacing: 8) {
-                        Image(systemName: "doc.badge.gearshape")
+                        Image(systemName: "arrow.up.doc")
                             .font(.title2)
-                            .foregroundStyle(.secondary)
-                        Text("Start a storage scan to list the largest files in your selected directory.")
+                            .foregroundStyle(SpaceSenseTheme.slate)
+                        Text("Run a scan to list files >= \(Int(appState.largeFileThresholdMB)) MB.")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
+                            .foregroundStyle(SpaceSenseTheme.slate)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 28)
@@ -256,11 +244,11 @@ public struct OverviewView: View {
             SurfaceCard {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Smart Cleanup Summary")
+                        Text("Delete Hub")
                             .font(.headline)
                         Spacer()
-                        Button("Review Cleanup") {
-                            appState.selectedSection = .smartCleanup
+                        Button("Review Items") {
+                            appState.selectedSection = .deleteHub
                         }
                         .buttonStyle(.link)
                         .font(.caption)
@@ -270,9 +258,9 @@ public struct OverviewView: View {
                         .font(.title2.weight(.bold))
                         .foregroundStyle(SpaceSenseTheme.secondaryAccent)
 
-                    Text("Identified across \(appState.cleanupCandidates.count) safe candidates (caches, logs, Xcode DerivedData, installers, and duplicate copies).")
+                    Text("Across \(appState.cleanupCandidates.count) unused large files (> \(appState.unusedFileDaysThreshold)d), exact duplicates, caches, and installers.")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SpaceSenseTheme.slate)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -291,15 +279,15 @@ public struct OverviewView: View {
                     }
 
                     if appState.growthDeltas.isEmpty {
-                        Text("Run two or more scans to see which categories and folders have grown or shrunk.")
+                        Text("Run two or more scans to see which categories and folders are growing.")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(SpaceSenseTheme.slate)
                             .padding(.vertical, 12)
                     } else {
                         ForEach(appState.growthDeltas.prefix(5)) { delta in
                             HStack {
                                 Image(systemName: delta.deltaBytes >= 0 ? "arrow.up.right.circle.fill" : "arrow.down.right.circle.fill")
-                                    .foregroundStyle(delta.deltaBytes >= 0 ? SpaceSenseTheme.warning : SpaceSenseTheme.secondaryAccent)
+                                    .foregroundStyle(delta.deltaBytes >= 0 ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
                                 Text(delta.name)
                                     .font(.caption.weight(.medium))
                                     .lineLimit(1)
@@ -308,7 +296,7 @@ public struct OverviewView: View {
                                 let sign = delta.deltaBytes >= 0 ? "+" : ""
                                 Text("\(sign)\(ByteFormatting.string(delta.deltaBytes))")
                                     .font(.caption.monospacedDigit().weight(.semibold))
-                                    .foregroundStyle(delta.deltaBytes >= 0 ? SpaceSenseTheme.warning : SpaceSenseTheme.secondaryAccent)
+                                    .foregroundStyle(delta.deltaBytes >= 0 ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
                             }
                             .padding(.vertical, 2)
                         }

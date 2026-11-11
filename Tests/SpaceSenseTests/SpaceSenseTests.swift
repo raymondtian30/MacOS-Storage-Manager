@@ -17,7 +17,7 @@ struct SpaceSenseTests {
         #expect(stats.totalBytes > 0)
         #expect(stats.usedBytes >= 0)
         #expect(stats.availableBytes >= 0)
-        #expect(NavigationSection.allCases.count == 9)
+        #expect(NavigationSection.allCases.count == 7)
         #expect(AppAppearanceMode.dark.colorScheme == .dark)
         #expect(AppAppearanceMode.light.colorScheme == .light)
         #expect(AppAppearanceMode.system.colorScheme == nil)
@@ -66,7 +66,7 @@ struct SpaceSenseTests {
         #expect(result.largeFiles.count == 1)
         #expect(result.largeFiles.first?.name == "clip.mov")
 
-        let cachedSize = await scanner.cachedDirectorySize(for: tempRoot.standardizedFileURL.path)
+        let cachedSize = await scanner.cachedDirectorySize(for: tempRoot.resolvingSymlinksInPath().standardizedFileURL.path)
         #expect(cachedSize != nil)
     }
 

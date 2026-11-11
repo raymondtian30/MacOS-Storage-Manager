@@ -24,12 +24,6 @@ public struct StorageAnalyzerView: View {
         VStack(alignment: .leading, spacing: 16) {
             topBar
 
-            if appState.isScanning {
-                ScanProgressBanner(progress: appState.scanProgress) {
-                    appState.cancelScan()
-                }
-            }
-
             if let currentNode = appState.analyzerCurrentNode {
                 breadcrumbBar(currentNode: currentNode)
 
@@ -61,16 +55,14 @@ public struct StorageAnalyzerView: View {
                 Label("Choose Folder…", systemImage: "folder.badge.plus")
             }
             .buttonStyle(.bordered)
-            .disabled(appState.isScanning)
 
             Button {
-                appState.startScan()
+                appState.requestStartScan(at: appState.selectedScanRoot)
             } label: {
                 Label("Scan \(appState.selectedScanRoot.lastPathComponent)", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.borderedProminent)
             .tint(SpaceSenseTheme.accent)
-            .disabled(appState.isScanning)
         }
     }
 
@@ -92,7 +84,7 @@ public struct StorageAnalyzerView: View {
                             if idx > 0 {
                                 Image(systemName: "chevron.right")
                                     .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(SpaceSenseTheme.slate)
                             }
                             Button {
                                 appState.drillDown(to: crumb)
@@ -117,9 +109,12 @@ public struct StorageAnalyzerView: View {
 
                 Spacer()
 
-                Text("Folder Total: \(ByteFormatting.string(currentNode.size))")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("Allocated Size: \(ByteFormatting.string(currentNode.size))")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(SpaceSenseTheme.slate)
+                    InfoTooltipIcon("Allocated size measures physical 4 KB blocks reserved on your APFS volume rather than logical byte length.")
+                }
 
                 Button {
                     appState.revealInFinder(currentNode.url)
@@ -140,20 +135,18 @@ public struct StorageAnalyzerView: View {
                 HStack {
                     Text("Storage Treemap")
                         .font(.headline)
+                    InfoTooltipIcon("Each block's area is proportional to its physical disk footprint inside the current folder. Click a folder block to drill down.")
                     Spacer()
-                    Text("Click any folder block to drill down")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
                 if items.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: "square.dashed")
                             .font(.largeTitle)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(SpaceSenseTheme.slate)
                         Text("No matching items in this folder.")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(SpaceSenseTheme.slate)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -210,7 +203,7 @@ public struct StorageAnalyzerView: View {
                 List(children) { item in
                     HStack(spacing: 10) {
                         Image(systemName: item.isDirectory ? "folder.fill" : item.category.icon)
-                            .foregroundStyle(item.isDirectory ? SpaceSenseTheme.accent : item.category.color)
+                            .foregroundStyle(item.isDirectory ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
                             .frame(width: 20)
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -219,23 +212,23 @@ public struct StorageAnalyzerView: View {
                                     .font(.subheadline.weight(.medium))
                                     .lineLimit(1)
                                 if !item.isAccessible {
-                                    Text("Permission Restricted")
+                                    Text("Restricted")
                                         .font(.caption2)
                                         .padding(.horizontal, 5)
                                         .padding(.vertical, 1)
-                                        .background(Color.orange.opacity(0.2), in: Capsule())
+                                        .background(SpaceSenseTheme.slate.opacity(0.2), in: Capsule())
                                 }
                             }
                             HStack(spacing: 8) {
                                 Text(item.url.path)
                                     .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(SpaceSenseTheme.slate)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                 if let mod = item.modificationDate {
                                     Text("• \(mod.formatted(date: .abbreviated, time: .omitted))")
                                         .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(SpaceSenseTheme.slate)
                                 }
                             }
                         }
@@ -246,7 +239,7 @@ public struct StorageAnalyzerView: View {
                             Text(ByteFormatting.string(item.size))
                                 .font(.caption.monospacedDigit().weight(.semibold))
                             ProgressView(value: min(1.0, max(0.0, Double(item.size) / Double(parentTotal))))
-                                .tint(item.category.color)
+                                .tint(item.isDirectory ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
                                 .frame(width: 70)
                         }
 
@@ -263,7 +256,7 @@ public struct StorageAnalyzerView: View {
                         Button {
                             appState.revealInFinder(item.url)
                         } label: {
-                            Image(systemName: "magnifyingglass.circle")
+                            Image(systemName: "folder")
                         }
                         .buttonStyle(.borderless)
                         .help("Reveal in Finder")
@@ -291,9 +284,9 @@ public struct StorageAnalyzerView: View {
                     .foregroundStyle(SpaceSenseTheme.accent)
                 Text("Ready to Analyze Your Storage")
                     .font(.title3.weight(.semibold))
-                Text("Select a folder or volume to calculate directory sizes, explore the interactive treemap, and inspect subfolders.")
+                Text("Select a folder or scan your Home directory to calculate folder sizes and explore the interactive treemap.")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SpaceSenseTheme.slate)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 460)
                 HStack(spacing: 12) {
@@ -303,7 +296,7 @@ public struct StorageAnalyzerView: View {
                     .buttonStyle(.bordered)
 
                     Button("Scan Home Directory") {
-                        appState.startScan(at: FileManager.default.homeDirectoryForCurrentUser)
+                        appState.requestStartScan(at: FileManager.default.homeDirectoryForCurrentUser)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(SpaceSenseTheme.accent)
@@ -367,23 +360,24 @@ public struct SquarifiedTreemapView: View {
             ZStack(alignment: .topLeading) {
                 ForEach(rects, id: \.node.id) { entry in
                     let isHovered = hoveredID == entry.node.id
+                    let baseColor = entry.node.isDirectory ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent
                     Button {
                         onSelect(entry.node)
                     } label: {
                         ZStack(alignment: .topLeading) {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
                                 .fill(
                                     LinearGradient(
                                         colors: [
-                                            entry.node.category.color.opacity(isHovered ? 0.92 : 0.78),
-                                            entry.node.category.color.opacity(isHovered ? 0.72 : 0.55)
+                                            baseColor.opacity(isHovered ? 0.88 : 0.68),
+                                            baseColor.opacity(isHovered ? 0.62 : 0.42)
                                         ],
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     )
                                 )
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .strokeBorder(Color.white.opacity(isHovered ? 0.65 : 0.18), lineWidth: isHovered ? 1.5 : 1)
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(Color.white.opacity(isHovered ? 0.65 : 0.16), lineWidth: isHovered ? 1.5 : 1)
 
                             if entry.rect.width > 58 && entry.rect.height > 36 {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -413,7 +407,7 @@ public struct SquarifiedTreemapView: View {
                             hoveredID = nil
                         }
                     }
-                    .help("\(entry.node.name) — \(ByteFormatting.string(entry.node.size)) (\(entry.node.category.rawValue))")
+                    .help("\(entry.node.name) — \(ByteFormatting.string(entry.node.size))")
                 }
             }
         }

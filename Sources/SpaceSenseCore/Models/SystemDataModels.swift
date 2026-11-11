@@ -8,9 +8,9 @@ public enum MeasurabilityType: String, Codable, Sendable {
 
     public var badgeColor: Color {
         switch self {
-        case .measured: return .green
-        case .estimated: return .orange
-        case .restricted: return .secondary
+        case .measured: return Color(red: 0.20, green: 0.82, blue: 0.64)
+        case .estimated: return Color(red: 0.22, green: 0.68, blue: 0.96)
+        case .restricted: return Color(red: 0.46, green: 0.54, blue: 0.66)
         }
     }
 }
@@ -22,9 +22,9 @@ public enum CleanupRecommendationLevel: String, Codable, Sendable {
 
     public var color: Color {
         switch self {
-        case .recommended: return .green
-        case .reviewCarefully: return .orange
-        case .doNotModify: return .red
+        case .recommended: return Color(red: 0.20, green: 0.82, blue: 0.64)
+        case .reviewCarefully: return Color(red: 0.22, green: 0.68, blue: 0.96)
+        case .doNotModify: return Color(red: 0.46, green: 0.54, blue: 0.66)
         }
     }
 }

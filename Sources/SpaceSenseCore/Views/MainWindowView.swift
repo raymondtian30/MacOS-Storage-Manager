@@ -10,14 +10,14 @@ public struct MainWindowView: View {
     public var body: some View {
         NavigationSplitView {
             sidebarContent
-                .navigationSplitViewColumnWidth(min: 220, ideal: 235, max: 270)
+                .navigationSplitViewColumnWidth(min: 215, ideal: 230, max: 260)
         } detail: {
             VStack(spacing: 0) {
                 if let errorMsg = appState.activeErrorMessage {
                     bannerBar(
                         message: errorMsg,
                         icon: "exclamationmark.triangle.fill",
-                        tint: SpaceSenseTheme.danger
+                        tint: SpaceSenseTheme.accent
                     ) {
                         appState.activeErrorMessage = nil
                     }
@@ -31,12 +31,12 @@ public struct MainWindowView: View {
                     }
                 }
 
-                if appState.isScanning && appState.selectedSection != .overview && appState.selectedSection != .analyzer {
+                if appState.isScanning {
                     ScanProgressBanner(progress: appState.scanProgress) {
                         appState.cancelScan()
                     }
                     .padding(.horizontal, 24)
-                    .padding(.top, 12)
+                    .padding(.top, 14)
                 }
 
                 detailView
@@ -44,6 +44,19 @@ public struct MainWindowView: View {
             }
         }
         .preferredColorScheme(appState.appearanceMode.colorScheme)
+        .alert(
+            "Scan in progress, would you like to stop the scan?",
+            isPresented: $appState.showingStopScanPrompt
+        ) {
+            Button("Stop Scan", role: .destructive) {
+                appState.cancelScan()
+            }
+            Button("Continue Scanning", role: .cancel) {
+                appState.showingStopScanPrompt = false
+            }
+        } message: {
+            Text("A filesystem scan is currently running (\(Int(appState.scanProgress.percent))% complete). Stopping it will keep the partial progress from overwriting your previous scan.")
+        }
     }
 
     private var sidebarContent: some View {
@@ -66,9 +79,9 @@ public struct MainWindowView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("SpaceSense")
                         .font(.headline.weight(.bold))
-                    Text("macOS Storage Manager")
+                    Text("v\(AppState.currentVersion)")
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SpaceSenseTheme.slate)
                 }
             }
             .padding(.horizontal, 16)
@@ -90,13 +103,13 @@ public struct MainWindowView: View {
                     Spacer()
                     Text("\(ByteFormatting.compactString(appState.volumeStats.availableBytes)) free")
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SpaceSenseTheme.secondaryAccent)
                 }
                 ProgressView(value: appState.volumeStats.utilizationPercentage, total: 100)
-                    .tint(appState.volumeStats.utilizationPercentage > 85 ? SpaceSenseTheme.danger : SpaceSenseTheme.accent)
+                    .tint(SpaceSenseTheme.accent)
                 Text("\(ByteFormatting.compactString(appState.volumeStats.usedBytes)) of \(ByteFormatting.compactString(appState.volumeStats.totalBytes)) used")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SpaceSenseTheme.slate)
             }
             .padding(14)
         }
@@ -109,14 +122,10 @@ public struct MainWindowView: View {
             OverviewView(appState: appState)
         case .analyzer:
             StorageAnalyzerView(appState: appState)
-        case .largeFiles:
-            LargeFilesView(appState: appState)
-        case .duplicates:
-            DuplicateFinderView(appState: appState)
+        case .deleteHub:
+            SmartCleanupView(appState: appState)
         case .systemData:
             SystemDataView(appState: appState)
-        case .smartCleanup:
-            SmartCleanupView(appState: appState)
         case .history:
             StorageHistoryView(appState: appState)
         case .aiAssistant:
@@ -148,6 +157,6 @@ public struct MainWindowView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(tint.opacity(0.15))
+        .background(tint.opacity(0.14))
     }
 }

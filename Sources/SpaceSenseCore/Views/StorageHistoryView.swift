@@ -20,13 +20,12 @@ public struct StorageHistoryView: View {
                     )
 
                     Button {
-                        appState.startScan()
+                        appState.requestStartScan()
                     } label: {
                         Label("Record New Scan", systemImage: "plus.circle.fill")
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(SpaceSenseTheme.accent)
-                    .disabled(appState.isScanning)
                 }
 
                 usedStorageChartCard
@@ -47,11 +46,11 @@ public struct StorageHistoryView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Used vs. Available Disk Storage Over Time")
+                        Text("Used Disk Storage Over Time")
                             .font(.headline)
-                        Text("Stored locally in SQLite (\(appState.historyStore.databasePath))")
+                        Text("Stored locally in SQLite")
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(SpaceSenseTheme.slate)
                     }
                     Spacer()
                 }
@@ -59,7 +58,7 @@ public struct StorageHistoryView: View {
                 if appState.historySnapshots.isEmpty {
                     Text("Run your first storage scan to start recording historical disk utilization.")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SpaceSenseTheme.slate)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 36)
                 } else {
@@ -72,7 +71,7 @@ public struct StorageHistoryView: View {
                             )
                             .foregroundStyle(
                                 LinearGradient(
-                                    colors: [SpaceSenseTheme.accent.opacity(0.45), SpaceSenseTheme.accent.opacity(0.05)],
+                                    colors: [SpaceSenseTheme.accent.opacity(0.42), SpaceSenseTheme.accent.opacity(0.04)],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
@@ -89,7 +88,7 @@ public struct StorageHistoryView: View {
                                 x: .value("Scan Time", snap.timestamp),
                                 y: .value("Used (GB)", usedGB)
                             )
-                            .foregroundStyle(SpaceSenseTheme.accent)
+                            .foregroundStyle(SpaceSenseTheme.secondaryAccent)
                         }
                     }
                     .chartYAxisLabel("GB Used")
@@ -119,7 +118,7 @@ public struct StorageHistoryView: View {
                 if appState.historySnapshots.isEmpty {
                     Text("No category history recorded yet.")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SpaceSenseTheme.slate)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 36)
                 } else {
@@ -131,7 +130,7 @@ public struct StorageHistoryView: View {
                                 x: .value("Scan", "#\(snap.id) \(snap.timestamp.formatted(date: .omitted, time: .shortened))"),
                                 y: .value("Size (MB)", mbValue)
                             )
-                            .foregroundStyle(selectedCategoryForChart.color)
+                            .foregroundStyle(SpaceSenseTheme.secondaryAccent)
                         }
                     }
                     .chartYAxisLabel("MB")
@@ -144,22 +143,25 @@ public struct StorageHistoryView: View {
     private var growthDeltasCard: some View {
         SurfaceCard {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Growing Categories & Folders")
-                    .font(.headline)
+                HStack(spacing: 6) {
+                    Text("Growing Categories & Folders")
+                        .font(.headline)
+                    InfoTooltipIcon("Compares the two most recent scans of the same root folder to highlight where new disk usage is accumulating.")
+                }
                 Text("Changes between your two most recent scans")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SpaceSenseTheme.slate)
 
                 if appState.growthDeltas.isEmpty {
-                    Text("Run at least two scans to compare folder and category growth.")
+                    Text("Run at least two scans of the same directory to compare growth.")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SpaceSenseTheme.slate)
                         .padding(.vertical, 32)
                 } else {
                     ForEach(appState.growthDeltas.prefix(8)) { delta in
                         HStack(spacing: 8) {
                             Image(systemName: delta.isFolder ? "folder.fill" : "tag.fill")
-                                .foregroundStyle(delta.deltaBytes >= 0 ? SpaceSenseTheme.warning : SpaceSenseTheme.secondaryAccent)
+                                .foregroundStyle(delta.deltaBytes >= 0 ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(delta.name)
                                     .font(.caption.weight(.medium))
@@ -167,13 +169,13 @@ public struct StorageHistoryView: View {
                                     .truncationMode(.middle)
                                 Text("\(ByteFormatting.string(delta.previousBytes)) → \(ByteFormatting.string(delta.currentBytes))")
                                     .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(SpaceSenseTheme.slate)
                             }
                             Spacer()
                             let sign = delta.deltaBytes >= 0 ? "+" : ""
                             Text("\(sign)\(ByteFormatting.string(delta.deltaBytes))")
                                 .font(.caption.monospacedDigit().weight(.bold))
-                                .foregroundStyle(delta.deltaBytes >= 0 ? SpaceSenseTheme.warning : SpaceSenseTheme.secondaryAccent)
+                                .foregroundStyle(delta.deltaBytes >= 0 ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
                         }
                         .padding(.vertical, 3)
                     }
@@ -192,7 +194,7 @@ public struct StorageHistoryView: View {
                 if appState.historySnapshots.isEmpty {
                     Text("No snapshots recorded yet.")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SpaceSenseTheme.slate)
                 } else {
                     ForEach(appState.historySnapshots.reversed().prefix(15)) { snap in
                         HStack {
@@ -201,7 +203,7 @@ public struct StorageHistoryView: View {
                                     .font(.subheadline.weight(.medium))
                                 Text("Scanned path: \(snap.scannedPath)")
                                     .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(SpaceSenseTheme.slate)
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 2) {
@@ -209,7 +211,7 @@ public struct StorageHistoryView: View {
                                     .font(.caption.monospacedDigit().weight(.semibold))
                                 Text("Disk Used: \(ByteFormatting.string(snap.usedBytes)) • Free: \(ByteFormatting.string(snap.availableBytes))")
                                     .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(SpaceSenseTheme.slate)
                             }
                         }
                         .padding(.vertical, 4)

@@ -9,8 +9,7 @@ public struct AIAssistantView: View {
         "Why is my Mac running low on storage?",
         "What is consuming the most space?",
         "Why is System Data so large?",
-        "Which files should I investigate?",
-        "What can I safely clean?",
+        "Which unused large files can I safely delete?",
         "Which folders have grown the most?",
         "Why is this particular folder so large?"
     ]
@@ -21,10 +20,10 @@ public struct AIAssistantView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
+            HStack(spacing: 10) {
                 SectionHeaderBar(
                     title: "AI Storage Assistant",
-                    subtitle: "Powered by Google Gemini (\(appState.geminiModel)) — grounded strictly in your actual scan telemetry",
+                    subtitle: "\(appState.detectedAIProvider.rawValue) (\(appState.geminiModel)) — grounded strictly in your actual scan telemetry",
                     icon: NavigationSection.aiAssistant.icon
                 )
 
@@ -40,23 +39,25 @@ public struct AIAssistantView: View {
                 Button {
                     showingContextInspector = true
                 } label: {
-                    Label("Inspect Shared Telemetry", systemImage: "eye.trianglebadge.exclamationmark")
+                    Label("Shared Telemetry", systemImage: "eye")
                         .font(.caption)
                 }
                 .buttonStyle(.bordered)
+
+                InfoTooltipIcon("SpaceSense never uploads file contents. Only the aggregated folder sizes and file metadata shown in Shared Telemetry are sent to your chosen AI model.")
             }
 
             if !appState.hasConfiguredAPIKey {
                 SurfaceCard(padding: 12) {
                     HStack(spacing: 12) {
                         Image(systemName: "key.fill")
-                            .foregroundStyle(SpaceSenseTheme.warning)
+                            .foregroundStyle(SpaceSenseTheme.accent)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Gemini API Key Required for AI Responses")
+                            Text("API Key Required for AI Responses")
                                 .font(.subheadline.weight(.semibold))
-                            Text("All other SpaceSense features work offline. Add your Gemini API key in Settings to enable AI storage analysis.")
+                            Text("Paste any API key (Gemini, OpenAI, Anthropic, Groq, xAI, or OpenRouter) in Settings for automatic model detection.")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(SpaceSenseTheme.slate)
                         }
                         Spacer()
                         Button("Configure API Key") {
@@ -83,9 +84,9 @@ public struct AIAssistantView: View {
                                 HStack(spacing: 8) {
                                     ProgressView()
                                         .controlSize(.small)
-                                    Text("Analyzing your storage telemetry with Gemini…")
+                                    Text("Analyzing your storage telemetry with \(appState.geminiModel)…")
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(SpaceSenseTheme.slate)
                                 }
                                 .padding(10)
                             }
@@ -139,11 +140,11 @@ public struct AIAssistantView: View {
     private func messageBubble(_ message: AIMessage) -> some View {
         HStack(alignment: .top, spacing: 10) {
             if message.role == .assistant {
-                Image(systemName: message.isError ? "exclamationmark.triangle.fill" : "brain.head.profile")
-                    .foregroundStyle(message.isError ? SpaceSenseTheme.danger : SpaceSenseTheme.accent)
+                Image(systemName: message.isError ? "exclamationmark.triangle.fill" : "sparkles")
+                    .foregroundStyle(message.isError ? SpaceSenseTheme.slate : SpaceSenseTheme.accent)
                     .frame(width: 26, height: 26)
                     .background(
-                        (message.isError ? SpaceSenseTheme.danger : SpaceSenseTheme.accent).opacity(0.14),
+                        (message.isError ? SpaceSenseTheme.slate : SpaceSenseTheme.accent).opacity(0.14),
                         in: Circle()
                     )
             } else {
@@ -159,13 +160,13 @@ public struct AIAssistantView: View {
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .fill(
                                 message.role == .user
-                                ? SpaceSenseTheme.accent.opacity(0.22)
-                                : (message.isError ? SpaceSenseTheme.danger.opacity(0.15) : Color.primary.opacity(0.06))
+                                ? SpaceSenseTheme.accent.opacity(0.20)
+                                : SpaceSenseTheme.slate.opacity(0.10)
                             )
                     )
                 Text(message.timestamp.formatted(date: .omitted, time: .shortened))
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SpaceSenseTheme.slate)
             }
             .frame(maxWidth: 680, alignment: message.role == .user ? .trailing : .leading)
 
@@ -178,7 +179,7 @@ public struct AIAssistantView: View {
     private var inputBar: some View {
         SurfaceCard(padding: 10) {
             HStack(spacing: 10) {
-                TextField("Ask about your storage scan results, System Data, or growing folders…", text: $inputPrompt)
+                TextField("Ask about your storage scan results, System Data, or Delete Hub candidates…", text: $inputPrompt)
                     .textFieldStyle(.plain)
                     .onSubmit {
                         submitPrompt()
@@ -187,7 +188,7 @@ public struct AIAssistantView: View {
                 Button {
                     submitPrompt()
                 } label: {
-                    Label("Ask Gemini", systemImage: "paperplane.fill")
+                    Label("Ask AI", systemImage: "paperplane.fill")
                         .fontWeight(.semibold)
                 }
                 .buttonStyle(.borderedProminent)
@@ -217,9 +218,9 @@ private struct TelemetryPreviewSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Privacy & AI Telemetry Inspector")
                         .font(.headline)
-                    Text("SpaceSense never uploads your personal file contents. Below is the exact structured metadata summary sent to Gemini when you ask a question.")
+                    Text("SpaceSense never uploads your personal file contents. Below is the exact structured metadata summary sent to your AI provider.")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(SpaceSenseTheme.slate)
                 }
                 Spacer()
                 Button("Close") { dismiss() }

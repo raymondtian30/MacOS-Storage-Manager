@@ -1,10 +1,43 @@
 import SwiftUI
 
+/// Sleek 3-color palette:
+/// 1. Electric Cyan (`accent`)
+/// 2. Emerald Mint (`secondaryAccent`)
+/// 3. Cool Slate (`slate`)
 public enum SpaceSenseTheme {
-    public static let accent = Color(red: 0.32, green: 0.58, blue: 0.98)
-    public static let secondaryAccent = Color(red: 0.42, green: 0.78, blue: 0.66)
-    public static let warning = Color(red: 0.96, green: 0.65, blue: 0.23)
-    public static let danger = Color(red: 0.94, green: 0.36, blue: 0.40)
+    public static let accent = Color(red: 0.22, green: 0.68, blue: 0.96)
+    public static let secondaryAccent = Color(red: 0.20, green: 0.82, blue: 0.64)
+    public static let slate = Color(red: 0.46, green: 0.54, blue: 0.66)
+    public static let warning = Color(red: 0.22, green: 0.68, blue: 0.96)
+    public static let danger = Color(red: 0.46, green: 0.54, blue: 0.66)
+}
+
+/// Hoverable question-mark icon used strictly next to technical or non-obvious storage concepts.
+public struct InfoTooltipIcon: View {
+    public let explanation: String
+    @State private var isHovering: Bool = false
+
+    public init(_ explanation: String) {
+        self.explanation = explanation
+    }
+
+    public var body: some View {
+        Image(systemName: "questionmark.circle")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(isHovering ? SpaceSenseTheme.accent : SpaceSenseTheme.slate)
+            .onHover { hovering in
+                isHovering = hovering
+            }
+            .popover(isPresented: $isHovering, arrowEdge: .top) {
+                Text(explanation)
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+                    .padding(10)
+                    .frame(width: 260, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .help(explanation)
+    }
 }
 
 public struct SurfaceCard<Content: View>: View {
@@ -20,12 +53,12 @@ public struct SurfaceCard<Content: View>: View {
         content
             .padding(padding)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.85))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.9))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.09), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(SpaceSenseTheme.slate.opacity(0.18), lineWidth: 1)
             )
     }
 }
@@ -36,13 +69,22 @@ public struct MetricCardView: View {
     public let subtitle: String
     public let icon: String
     public let tint: Color
+    public let tooltip: String?
 
-    public init(title: String, value: String, subtitle: String, icon: String, tint: Color) {
+    public init(
+        title: String,
+        value: String,
+        subtitle: String,
+        icon: String,
+        tint: Color,
+        tooltip: String? = nil
+    ) {
         self.title = title
         self.value = value
         self.subtitle = subtitle
         self.icon = icon
         self.tint = tint
+        self.tooltip = tooltip
     }
 
     public var body: some View {
@@ -53,8 +95,11 @@ public struct MetricCardView: View {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(tint)
                         .frame(width: 28, height: 28)
-                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     Spacer()
+                    if let tooltip {
+                        InfoTooltipIcon(tooltip)
+                    }
                 }
                 Text(value)
                     .font(.system(size: 22, weight: .bold, design: .rounded))
@@ -65,7 +110,7 @@ public struct MetricCardView: View {
                     .foregroundStyle(.primary)
                 Text(subtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SpaceSenseTheme.slate)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -89,17 +134,17 @@ public struct SectionHeaderBar: View {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(SpaceSenseTheme.accent)
-                .frame(width: 36, height: 36)
+                .frame(width: 38, height: 38)
                 .background(
                     SpaceSenseTheme.accent.opacity(0.14),
-                    in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                 )
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.title2.weight(.bold))
                 Text(subtitle)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(SpaceSenseTheme.slate)
             }
             Spacer()
         }
@@ -116,30 +161,36 @@ public struct ScanProgressBanner: View {
     }
 
     public var body: some View {
-        SurfaceCard(padding: 12) {
-            HStack(spacing: 14) {
-                ProgressView()
-                    .controlSize(.small)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 10) {
-                        Text("Scanning Filesystem...")
-                            .font(.subheadline.weight(.semibold))
-                        Text("\(progress.filesScanned.formatted()) files • \(ByteFormatting.string(progress.bytesScanned))")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
+        SurfaceCard(padding: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Scanning Filesystem…")
+                        .font(.subheadline.weight(.semibold))
+                    Text("\(Int(progress.percent))%")
+                        .font(.subheadline.monospacedDigit().weight(.bold))
+                        .foregroundStyle(SpaceSenseTheme.accent)
+                    Text("• \(progress.filesScanned.formatted()) files (\(ByteFormatting.string(progress.bytesScanned)))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(SpaceSenseTheme.slate)
+                    Spacer()
+                    Button(role: .cancel, action: onCancel) {
+                        Label("Stop Scan", systemImage: "xmark.circle.fill")
                     }
-                    Text(progress.currentPath)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
-                Spacer()
-                Button(role: .cancel, action: onCancel) {
-                    Label("Cancel Scan", systemImage: "xmark.circle.fill")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+
+                ProgressView(value: progress.percent, total: 100.0)
+                    .progressViewStyle(.linear)
+                    .tint(SpaceSenseTheme.accent)
+
+                Text(progress.currentPath)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(SpaceSenseTheme.slate)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
         }
     }

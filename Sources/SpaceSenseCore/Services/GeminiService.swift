@@ -1,5 +1,56 @@
 import Foundation
 
+public enum AIProvider: String, CaseIterable, Codable, Identifiable, Sendable {
+    case gemini = "Google Gemini"
+    case openai = "OpenAI"
+    case anthropic = "Anthropic Claude"
+    case groq = "Groq"
+    case xai = "xAI (Grok)"
+    case openRouter = "OpenRouter"
+
+    public var id: String { rawValue }
+
+    public var defaultModels: [String] {
+        switch self {
+        case .gemini:
+            return ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+        case .openai:
+            return ["gpt-4o-mini", "gpt-4o", "o3-mini"]
+        case .anthropic:
+            return ["claude-3-7-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-5-sonnet-latest"]
+        case .groq:
+            return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+        case .xai:
+            return ["grok-2-latest", "grok-beta"]
+        case .openRouter:
+            return ["openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "google/gemini-2.0-flash-001"]
+        }
+    }
+
+    public static func detect(from apiKey: String) -> AIProvider {
+        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("AIza") {
+            return .gemini
+        }
+        if trimmed.hasPrefix("sk-ant-") {
+            return .anthropic
+        }
+        if trimmed.hasPrefix("gsk_") {
+            return .groq
+        }
+        if trimmed.hasPrefix("xai-") {
+            return .xai
+        }
+        if trimmed.hasPrefix("sk-or-") {
+            return .openRouter
+        }
+        if trimmed.hasPrefix("sk-") {
+            return .openai
+        }
+        return .gemini
+    }
+}
+
 public struct AIMessage: Identifiable, Equatable, Sendable {
     public enum Role: String, Sendable {
         case user
@@ -38,29 +89,128 @@ public enum GeminiError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            return "Gemini API key is not configured. Open Settings to add your API key securely to the macOS Keychain."
+            return "No AI API key is configured. Open Settings to add any supported API key (Gemini, OpenAI, Anthropic, Groq, xAI, or OpenRouter)."
         case .invalidAPIKey:
-            return "The configured Gemini API key was rejected (HTTP 400/401/403). Please verify your key in Settings."
+            return "The configured API key was rejected (HTTP 401/403). Please verify your key in Settings."
         case .rateLimited:
-            return "Gemini API rate limit reached (HTTP 429). Please wait a moment and try again."
+            return "AI provider rate limit reached (HTTP 429). Please wait a moment and try again."
         case .serverError(let code, let detail):
-            return "Gemini API returned HTTP \(code): \(detail)"
+            return "AI API returned HTTP \(code): \(detail)"
         case .emptyResponse:
-            return "Gemini returned an empty response. Try rephrasing your question."
+            return "The AI model returned an empty response. Try rephrasing your question."
         case .networkError(let msg):
-            return "Network error while contacting Gemini: \(msg)"
+            return "Network error while contacting AI provider: \(msg)"
         }
     }
 }
 
 public struct GeminiService: Sendable {
-    public static let availableModels: [String] = [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash"
-    ]
+    public static var availableModels: [String] {
+        AIProvider.gemini.defaultModels
+    }
 
     public init() {}
+
+    /// Automatically detects the AI provider from the key and queries the provider's live `/models` endpoint
+    /// to discover available models for that specific API key.
+    public func autoDetectProviderAndModels(for apiKey: String) async -> (provider: AIProvider, models: [String], recommendedModel: String) {
+        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let provider = AIProvider.detect(from: trimmed)
+        guard !trimmed.isEmpty else {
+            let defaults = provider.defaultModels
+            return (provider, defaults, defaults[0])
+        }
+
+        if let liveModels = await fetchLiveModels(provider: provider, apiKey: trimmed), !liveModels.isEmpty {
+            let preferred = pickRecommendedModel(for: provider, from: liveModels)
+            return (provider, liveModels, preferred)
+        }
+
+        let fallback = provider.defaultModels
+        return (provider, fallback, fallback[0])
+    }
+
+    private func fetchLiveModels(provider: AIProvider, apiKey: String) async -> [String]? {
+        let urlString: String
+        var headers: [String: String] = [:]
+
+        switch provider {
+        case .gemini:
+            urlString = "https://generativelanguage.googleapis.com/v1beta/models"
+            headers["x-goog-api-key"] = apiKey
+        case .openai:
+            urlString = "https://api.openai.com/v1/models"
+            headers["Authorization"] = "Bearer \(apiKey)"
+        case .anthropic:
+            urlString = "https://api.anthropic.com/v1/models"
+            headers["x-api-key"] = apiKey
+            headers["anthropic-version"] = "2023-06-01"
+        case .groq:
+            urlString = "https://api.groq.com/openai/v1/models"
+            headers["Authorization"] = "Bearer \(apiKey)"
+        case .xai:
+            urlString = "https://api.x.ai/v1/models"
+            headers["Authorization"] = "Bearer \(apiKey)"
+        case .openRouter:
+            urlString = "https://openrouter.ai/api/v1/models"
+            headers["Authorization"] = "Bearer \(apiKey)"
+        }
+
+        guard let url = URL(string: urlString) else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 6
+        for (k, v) in headers {
+            request.setValue(v, forHTTPHeaderField: k)
+        }
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        if provider == .gemini, let modelsArray = json["models"] as? [[String: Any]] {
+            let names: [String] = modelsArray.compactMap { entry in
+                guard let rawName = entry["name"] as? String else { return nil }
+                let methods = entry["supportedGenerationMethods"] as? [String] ?? []
+                guard methods.isEmpty || methods.contains("generateContent") else { return nil }
+                let shortName = rawName.replacingOccurrences(of: "models/", with: "")
+                guard shortName.hasPrefix("gemini-") && !shortName.contains("embedding") && !shortName.contains("imagen") else {
+                    return nil
+                }
+                return shortName
+            }
+            return names.isEmpty ? nil : Array(names.prefix(15))
+        }
+
+        if let dataArray = json["data"] as? [[String: Any]] {
+            let ids: [String] = dataArray.compactMap { entry in
+                guard let id = entry["id"] as? String else { return nil }
+                let lower = id.lowercased()
+                if lower.contains("embed") || lower.contains("whisper") || lower.contains("tts") || lower.contains("dall-e") || lower.contains("moderation") {
+                    return nil
+                }
+                return id
+            }
+            return ids.isEmpty ? nil : Array(ids.prefix(20))
+        }
+
+        return nil
+    }
+
+    private func pickRecommendedModel(for provider: AIProvider, from available: [String]) -> String {
+        for preferred in provider.defaultModels {
+            if let exact = available.first(where: { $0 == preferred }) {
+                return exact
+            }
+            if let partial = available.first(where: { $0.contains(preferred) }) {
+                return partial
+            }
+        }
+        return available.first ?? provider.defaultModels[0]
+    }
 
     /// Builds a structured, privacy-safe summary of actual scan measurements without ever including file contents.
     public func buildStorageContextSummary(
@@ -101,7 +251,7 @@ public struct GeminiService: Sendable {
 
             lines.append("\n--- LARGEST INDIVIDUAL FILES (TOP 12 MEASURED) ---")
             for file in scan.largeFiles.prefix(12) {
-                lines.append("- \(formatPath(file.path, shareFullPaths: shareFullPaths)): \(ByteFormatting.string(file.size)) [Category: \(file.category.rawValue)]")
+                lines.append("- \(formatPath(file.path, shareFullPaths: shareFullPaths)): \(ByteFormatting.string(file.size)) [Last opened: \(file.daysSinceLastOpened())d ago, Category: \(file.category.rawValue)]")
             }
         } else {
             lines.append("\n--- DIRECTORY SCAN STATUS ---")
@@ -120,11 +270,11 @@ public struct GeminiService: Sendable {
         }
 
         let totalDupReclaimable = duplicateGroups.reduce(0) { $0 + $1.reclaimableBytes }
-        lines.append("\n--- DUPLICATES & SMART CLEANUP ---")
+        lines.append("\n--- DELETE HUB (DUPLICATES, UNUSED LARGE FILES & SAFE CLEANUP) ---")
         lines.append("Exact SHA-256 Duplicate Groups: \(duplicateGroups.count) (\(ByteFormatting.string(totalDupReclaimable)) potentially reclaimable)")
         let totalCleanupBytes = cleanupCandidates.reduce(0) { $0 + $1.sizeBytes }
-        lines.append("Smart Cleanup Candidates: \(cleanupCandidates.count) items totaling \(ByteFormatting.string(totalCleanupBytes))")
-        for candidate in cleanupCandidates.prefix(8) {
+        lines.append("Delete Hub Candidates: \(cleanupCandidates.count) items totaling \(ByteFormatting.string(totalCleanupBytes))")
+        for candidate in cleanupCandidates.prefix(10) {
             lines.append("- [\(candidate.kind.rawValue)] \(candidate.title): \(ByteFormatting.string(candidate.sizeBytes)) (\(candidate.risk.rawValue))")
         }
 
@@ -145,12 +295,15 @@ public struct GeminiService: Sendable {
         contextSummary: String,
         conversationHistory: [AIMessage],
         apiKey: String,
-        model: String = "gemini-2.5-flash"
+        model: String = "gemini-2.5-flash",
+        provider: AIProvider? = nil
     ) async throws -> String {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else {
             throw GeminiError.missingAPIKey
         }
+
+        let activeProvider = provider ?? AIProvider.detect(from: trimmedKey)
 
         let systemInstruction = """
         You are SpaceSense AI, an expert macOS storage advisor built into the native SpaceSense macOS app.
@@ -160,11 +313,47 @@ public struct GeminiService: Sendable {
         3. Clearly distinguish MEASURED storage values from ESTIMATED values (such as APFS snapshots or unindexed system data) and RESTRICTED/inaccessible locations.
         4. Explain findings in clear, practical, everyday language for a Mac user.
         5. Never recommend deleting macOS System Integrity Protection (SIP) files, /System, /usr, /bin, or active Application Support databases without warning about consequences.
-        6. Always recommend moving unneeded user files or caches to Trash via SpaceSense's review flow rather than running destructive terminal commands.
+        6. Always recommend moving unneeded user files or caches to Trash via SpaceSense's Delete Hub review flow rather than running destructive terminal commands.
 
         \(contextSummary)
         """
 
+        switch activeProvider {
+        case .gemini:
+            return try await callGeminiAPI(
+                question: question,
+                systemInstruction: systemInstruction,
+                conversationHistory: conversationHistory,
+                apiKey: trimmedKey,
+                model: model
+            )
+        case .anthropic:
+            return try await callAnthropicAPI(
+                question: question,
+                systemInstruction: systemInstruction,
+                conversationHistory: conversationHistory,
+                apiKey: trimmedKey,
+                model: model
+            )
+        case .openai, .groq, .xai, .openRouter:
+            return try await callOpenAICompatibleAPI(
+                provider: activeProvider,
+                question: question,
+                systemInstruction: systemInstruction,
+                conversationHistory: conversationHistory,
+                apiKey: trimmedKey,
+                model: model
+            )
+        }
+    }
+
+    private func callGeminiAPI(
+        question: String,
+        systemInstruction: String,
+        conversationHistory: [AIMessage],
+        apiKey: String,
+        model: String
+    ) async throws -> String {
         let encodedModel = model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "gemini-2.5-flash"
         guard let endpointURL = URL(
             string: "https://generativelanguage.googleapis.com/v1beta/models/\(encodedModel):generateContent"
@@ -201,10 +390,131 @@ public struct GeminiService: Sendable {
         var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 30
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
+        let (data, httpResponse) = try await performRequest(request)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let candidates = json["candidates"] as? [[String: Any]],
+              let firstCandidate = candidates.first,
+              let content = firstCandidate["content"] as? [String: Any],
+              let parts = content["parts"] as? [[String: Any]],
+              let text = parts.compactMap({ $0["text"] as? String }).first,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw GeminiError.emptyResponse
+        }
+        _ = httpResponse
+        return text
+    }
+
+    private func callAnthropicAPI(
+        question: String,
+        systemInstruction: String,
+        conversationHistory: [AIMessage],
+        apiKey: String,
+        model: String
+    ) async throws -> String {
+        guard let endpointURL = URL(string: "https://api.anthropic.com/v1/messages") else {
+            throw GeminiError.invalidAPIKey
+        }
+
+        var messages: [[String: String]] = []
+        let validHistory = conversationHistory.suffix(6).filter { !$0.isError }
+        for msg in validHistory.drop(while: { $0.role != .user }) {
+            messages.append([
+                "role": msg.role == .user ? "user" : "assistant",
+                "content": msg.content
+            ])
+        }
+        messages.append(["role": "user", "content": question])
+
+        let requestBody: [String: Any] = [
+            "model": model,
+            "max_tokens": 1200,
+            "system": systemInstruction,
+            "messages": messages
+        ]
+
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.timeoutInterval = 30
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+
+        let (data, _) = try await performRequest(request)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let content = json["content"] as? [[String: Any]],
+              let text = content.compactMap({ $0["text"] as? String }).first,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw GeminiError.emptyResponse
+        }
+        return text
+    }
+
+    private func callOpenAICompatibleAPI(
+        provider: AIProvider,
+        question: String,
+        systemInstruction: String,
+        conversationHistory: [AIMessage],
+        apiKey: String,
+        model: String
+    ) async throws -> String {
+        let urlString: String
+        switch provider {
+        case .openai, .gemini, .anthropic:
+            urlString = "https://api.openai.com/v1/chat/completions"
+        case .groq:
+            urlString = "https://api.groq.com/openai/v1/chat/completions"
+        case .xai:
+            urlString = "https://api.x.ai/v1/chat/completions"
+        case .openRouter:
+            urlString = "https://openrouter.ai/api/v1/chat/completions"
+        }
+
+        guard let endpointURL = URL(string: urlString) else {
+            throw GeminiError.invalidAPIKey
+        }
+
+        var messages: [[String: String]] = [
+            ["role": "system", "content": systemInstruction]
+        ]
+        for msg in conversationHistory.suffix(6).filter({ !$0.isError }) {
+            messages.append([
+                "role": msg.role == .user ? "user" : "assistant",
+                "content": msg.content
+            ])
+        }
+        messages.append(["role": "user", "content": question])
+
+        let requestBody: [String: Any] = [
+            "model": model,
+            "messages": messages,
+            "temperature": 0.2
+        ]
+
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+
+        let (data, _) = try await performRequest(request)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
+              let text = message["content"] as? String,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw GeminiError.emptyResponse
+        }
+        return text
+    }
+
+    private func performRequest(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let data: Data
         let response: URLResponse
         do {
@@ -219,7 +529,7 @@ public struct GeminiService: Sendable {
 
         switch httpResponse.statusCode {
         case 200...299:
-            break
+            return (data, httpResponse)
         case 401, 403:
             throw GeminiError.invalidAPIKey
         case 429:
@@ -231,18 +541,6 @@ public struct GeminiService: Sendable {
             }
             throw GeminiError.serverError(httpResponse.statusCode, String(bodyText.prefix(200)))
         }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let candidates = json["candidates"] as? [[String: Any]],
-              let firstCandidate = candidates.first,
-              let content = firstCandidate["content"] as? [String: Any],
-              let parts = content["parts"] as? [[String: Any]],
-              let text = parts.compactMap({ $0["text"] as? String }).first,
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw GeminiError.emptyResponse
-        }
-
-        return text
     }
 
     public func formatPath(_ path: String, shareFullPaths: Bool) -> String {
@@ -256,7 +554,6 @@ public struct GeminiService: Sendable {
         if shareFullPaths {
             return normalized
         }
-        // Redact intermediate user-specific folder names when privacy mode is strict
         let components = normalized.split(separator: "/", omittingEmptySubsequences: true)
         guard let last = components.last else { return normalized }
         if normalized.hasPrefix("~/") {

@@ -23,6 +23,8 @@ public enum AppAppearanceMode: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 @Observable
 public final class AppState {
+    public nonisolated static let currentVersion = "1.2.0"
+
     // Navigation
     public var selectedSection: NavigationSection = .overview
 
@@ -30,25 +32,25 @@ public final class AppState {
     public var volumeStats: VolumeStats = VolumeStats.currentBootVolume()
     public var selectedScanRoot: URL = FileManager.default.homeDirectoryForCurrentUser
     public var isScanning: Bool = false
+    public var showingStopScanPrompt: Bool = false
     public var scanProgress: ScanProgress = ScanProgress()
     public var latestScanResult: ScanResult?
     public var analyzerCurrentNode: FileNode?
     public var analyzerBreadcrumbs: [FileNode] = []
     public var analyzerCategoryFilter: StorageCategory?
 
-    // Duplicate Finder state
+    // Duplicate & Delete Hub state
     public var isFindingDuplicates: Bool = false
+    public var isRefreshingCleanup: Bool = false
     public var duplicateProgress: (processed: Int, total: Int) = (0, 0)
     public var duplicateGroups: [DuplicateGroup] = []
     public var duplicateMinimumSizeMB: Double = 1.0
+    public var cleanupCandidates: [CleanupCandidate] = []
+    public var lastCleanupResult: CleanupExecutionResult?
 
     // System Data state
     public var isAnalyzingSystemData: Bool = false
     public var systemDataReport: SystemDataReport?
-
-    // Smart Cleanup state
-    public var cleanupCandidates: [CleanupCandidate] = []
-    public var lastCleanupResult: CleanupExecutionResult?
 
     // History state
     public var historySnapshots: [ScanHistorySnapshot] = []
@@ -58,21 +60,38 @@ public final class AppState {
     public var aiMessages: [AIMessage] = [
         AIMessage(
             role: .assistant,
-            content: "Welcome to **SpaceSense AI**. Run a storage scan or System Data analysis, then ask me why your disk is filling up, which folders have grown the most, or what is safe to move to Trash."
+            content: "Welcome to **SpaceSense AI**. Run a storage scan, then ask me why your disk is filling up, which unused files are safe to remove in Delete Hub, or which folders have grown the most."
         )
     ]
     public var isAIThinking: Bool = false
+    public var detectedAIProvider: AIProvider = .gemini
+    public var detectedAIModels: [String] = AIProvider.gemini.defaultModels
+    public var isDetectingModels: Bool = false
+
+    // Updates state
+    public var isCheckingForUpdates: Bool = false
+    public var updateStatusMessage: String?
+    public var availableUpdateURL: URL?
 
     // Error & Banner notification state
     public var activeErrorMessage: String?
     public var statusBannerMessage: String?
 
-    // Settings & Preferences (persisted in UserDefaults / Keychain)
+    // Settings & Preferences
     public var geminiModel: String {
         didSet { UserDefaults.standard.set(geminiModel, forKey: "spacesense.geminiModel") }
     }
     public var largeFileThresholdMB: Double {
-        didSet { UserDefaults.standard.set(largeFileThresholdMB, forKey: "spacesense.largeFileThresholdMB") }
+        didSet {
+            UserDefaults.standard.set(largeFileThresholdMB, forKey: "spacesense.largeFileThresholdMB")
+            Task { await refreshCleanupRecommendationsAsync() }
+        }
+    }
+    public var unusedFileDaysThreshold: Int {
+        didSet {
+            UserDefaults.standard.set(unusedFileDaysThreshold, forKey: "spacesense.unusedFileDaysThreshold")
+            Task { await refreshCleanupRecommendationsAsync() }
+        }
     }
     public var includeHiddenFiles: Bool {
         didSet { UserDefaults.standard.set(includeHiddenFiles, forKey: "spacesense.includeHiddenFiles") }
@@ -106,15 +125,37 @@ public final class AppState {
 
     private var activeScanTask: Task<Void, Never>?
     private var activeDuplicateTask: Task<Void, Never>?
+    private var activeCleanupTask: Task<Void, Never>?
     private var currentScanID: UUID = UUID()
+
+    public nonisolated static let largeFileThresholdOptionsMB: [(label: String, value: Double)] = [
+        ("250 MB", 250.0),
+        ("500 MB", 500.0),
+        ("750 MB", 750.0),
+        ("1 GB", 1024.0)
+    ]
+
+    public nonisolated static let unusedDaysOptions: [(label: String, days: Int)] = [
+        ("30 Days", 30),
+        ("60 Days", 60),
+        ("90 Days", 90),
+        ("180 Days", 180),
+        ("1 Year (365 Days)", 365)
+    ]
 
     public init(historyStore: HistoryStore = HistoryStore()) {
         self.historyStore = historyStore
 
         let defaults = UserDefaults.standard
         self.geminiModel = defaults.string(forKey: "spacesense.geminiModel") ?? "gemini-2.5-flash"
+
         let savedThreshold = defaults.double(forKey: "spacesense.largeFileThresholdMB")
-        self.largeFileThresholdMB = savedThreshold > 0 ? savedThreshold : 50.0
+        let validThresholds: Set<Double> = [250.0, 500.0, 750.0, 1024.0]
+        self.largeFileThresholdMB = validThresholds.contains(savedThreshold) ? savedThreshold : 250.0
+
+        let savedUnusedDays = defaults.integer(forKey: "spacesense.unusedFileDaysThreshold")
+        self.unusedFileDaysThreshold = savedUnusedDays > 0 ? savedUnusedDays : 90
+
         self.includeHiddenFiles = defaults.object(forKey: "spacesense.includeHiddenFiles") as? Bool ?? true
         self.scanExclusions = defaults.stringArray(forKey: "spacesense.scanExclusions") ?? [
             "/dev",
@@ -132,11 +173,21 @@ public final class AppState {
         self.shareFullPathsWithAI = defaults.object(forKey: "spacesense.shareFullPathsWithAI") as? Bool ?? true
 
         _ = bookmarkManager.restoreSavedBookmarks()
-        self.hasConfiguredAPIKey = (keychainService.loadAPIKey() != nil)
+        if let savedKey = keychainService.loadAPIKey() {
+            self.hasConfiguredAPIKey = true
+            let provider = AIProvider.detect(from: savedKey)
+            self.detectedAIProvider = provider
+            self.detectedAIModels = provider.defaultModels
+            Task {
+                await detectModelsForSavedKey(savedKey)
+            }
+        } else {
+            self.hasConfiguredAPIKey = false
+        }
+
         self.historySnapshots = historyStore.fetchSnapshots()
         self.growthDeltas = historyStore.computeGrowthDeltas(snapshots: historySnapshots)
 
-        // Start a lightweight System Data analysis in background on launch
         Task {
             await refreshSystemData()
         }
@@ -146,7 +197,21 @@ public final class AppState {
         volumeStats = VolumeStats.currentBootVolume()
     }
 
+    /// Checks if a scan is already running before starting a new scan.
+    /// If a scan is running, presents "Scan in progress, would you like to stop the scan?"
+    public func requestStartScan(at url: URL? = nil) {
+        if isScanning {
+            showingStopScanPrompt = true
+            return
+        }
+        startScan(at: url)
+    }
+
     public func chooseDirectoryAndScan() {
+        if isScanning {
+            showingStopScanPrompt = true
+            return
+        }
         if let chosen = bookmarkManager.promptForDirectory(initialURL: selectedScanRoot) {
             selectedScanRoot = chosen
             startScan(at: chosen)
@@ -163,7 +228,7 @@ public final class AppState {
         isScanning = true
         activeErrorMessage = nil
         statusBannerMessage = nil
-        scanProgress = ScanProgress(currentPath: targetURL.path)
+        scanProgress = ScanProgress(currentPath: targetURL.path, progressFraction: 0.02)
 
         let config = ScannerConfiguration(
             minimumLargeFileBytes: Int64(largeFileThresholdMB * 1024 * 1024),
@@ -188,15 +253,13 @@ public final class AppState {
                 self.analyzerBreadcrumbs = [result.rootNode]
                 self.isScanning = false
 
-                // Record in SQLite history
                 _ = historyStore.recordScan(result, retentionDays: historyRetentionDays)
                 self.historySnapshots = historyStore.fetchSnapshots()
                 self.growthDeltas = historyStore.computeGrowthDeltas(snapshots: self.historySnapshots)
 
-                // Refresh System Data, Duplicates, and Smart Cleanup recommendations
                 await refreshSystemData()
                 await runDuplicateScan()
-                rebuildCleanupRecommendations()
+                await refreshCleanupRecommendationsAsync()
 
                 if enableScanNotifications {
                     postScanCompletedNotification(result: result)
@@ -204,7 +267,7 @@ public final class AppState {
             } catch is CancellationError {
                 guard self.currentScanID == scanID else { return }
                 self.isScanning = false
-                self.statusBannerMessage = "Storage scan cancelled."
+                self.statusBannerMessage = "Storage scan stopped."
             } catch {
                 guard self.currentScanID == scanID else { return }
                 self.isScanning = false
@@ -217,7 +280,8 @@ public final class AppState {
         activeScanTask?.cancel()
         activeScanTask = nil
         isScanning = false
-        statusBannerMessage = "Scan cancelled by user."
+        showingStopScanPrompt = false
+        statusBannerMessage = "Scan stopped."
     }
 
     // MARK: - Analyzer Navigation
@@ -238,7 +302,7 @@ public final class AppState {
         analyzerCurrentNode = analyzerBreadcrumbs.last
     }
 
-    // MARK: - Duplicate Finder
+    // MARK: - Duplicate Finder & Delete Hub
 
     public func runDuplicateScan() async {
         guard let scanResult = latestScanResult else { return }
@@ -262,7 +326,7 @@ public final class AppState {
                 guard !Task.isCancelled else { return }
                 self.duplicateGroups = groups
                 self.isFindingDuplicates = false
-                self.rebuildCleanupRecommendations()
+                await self.refreshCleanupRecommendationsAsync()
             } catch {
                 self.isFindingDuplicates = false
             }
@@ -284,7 +348,6 @@ public final class AppState {
         }
         let currentlyMarked = duplicateGroups[gIdx].files[fIdx].isMarkedForRemoval
         if !currentlyMarked {
-            // Ensure at least one copy in the group remains unmarked so the user never deletes all copies accidentally
             let unmarkedCount = duplicateGroups[gIdx].files.filter { !$0.isMarkedForRemoval }.count
             if unmarkedCount <= 1 {
                 statusBannerMessage = "At least one copy in each duplicate group is kept safe by default."
@@ -292,10 +355,10 @@ public final class AppState {
             }
         }
         duplicateGroups[gIdx].files[fIdx].isMarkedForRemoval.toggle()
-        rebuildCleanupRecommendations()
+        Task { await refreshCleanupRecommendationsAsync() }
     }
 
-    // MARK: - System Data & Smart Cleanup
+    // MARK: - System Data & Non-Blocking Cleanup Recommendations
 
     public func refreshSystemData() async {
         isAnalyzingSystemData = true
@@ -306,15 +369,44 @@ public final class AppState {
         )
         self.systemDataReport = report
         self.isAnalyzingSystemData = false
-        rebuildCleanupRecommendations()
+        await refreshCleanupRecommendationsAsync()
     }
 
     public func rebuildCleanupRecommendations() {
-        cleanupCandidates = cleanupEngine.buildRecommendations(
-            scanResult: latestScanResult,
-            systemDataReport: systemDataReport,
-            duplicateGroups: duplicateGroups
-        )
+        Task {
+            await refreshCleanupRecommendationsAsync()
+        }
+    }
+
+    /// Runs recommendation analysis on a background thread so the UI never freezes or shows a beachball.
+    public func refreshCleanupRecommendationsAsync() async {
+        activeCleanupTask?.cancel()
+        isRefreshingCleanup = true
+
+        let scanSnapshot = latestScanResult
+        let sysSnapshot = systemDataReport
+        let dupSnapshot = duplicateGroups
+        let unusedDays = unusedFileDaysThreshold
+        let thresholdBytes = Int64(largeFileThresholdMB * 1024 * 1024)
+        let engine = cleanupEngine
+
+        let task = Task.detached(priority: .userInitiated) { () -> [CleanupCandidate] in
+            engine.buildRecommendations(
+                scanResult: scanSnapshot,
+                systemDataReport: sysSnapshot,
+                duplicateGroups: dupSnapshot,
+                unusedDaysThreshold: unusedDays,
+                largeFileThresholdBytes: thresholdBytes
+            )
+        }
+
+        let built = await task.value
+        guard !Task.isCancelled else {
+            isRefreshingCleanup = false
+            return
+        }
+        self.cleanupCandidates = built
+        self.isRefreshingCleanup = false
     }
 
     public var totalReclaimableBytes: Int64 {
@@ -381,16 +473,32 @@ public final class AppState {
         NSWorkspace.shared.open(url)
     }
 
-    // MARK: - Gemini AI Assistant
+    // MARK: - Universal AI Key & Auto Model Detection
 
     public func saveAPIKey(_ key: String) {
         _ = keychainService.saveAPIKey(key)
         hasConfiguredAPIKey = (keychainService.loadAPIKey() != nil)
+        Task {
+            await detectModelsForSavedKey(key)
+        }
+    }
+
+    public func detectModelsForSavedKey(_ key: String) async {
+        isDetectingModels = true
+        let detected = await geminiService.autoDetectProviderAndModels(for: key)
+        detectedAIProvider = detected.provider
+        detectedAIModels = detected.models
+        if !detected.models.contains(geminiModel) {
+            geminiModel = detected.recommendedModel
+        }
+        isDetectingModels = false
     }
 
     public func removeAPIKey() {
         _ = keychainService.deleteAPIKey()
         hasConfiguredAPIKey = false
+        detectedAIProvider = .gemini
+        detectedAIModels = AIProvider.gemini.defaultModels
     }
 
     public func currentAIContextSummary() -> String {
@@ -409,7 +517,7 @@ public final class AppState {
         aiMessages = [
             AIMessage(
                 role: .assistant,
-                content: "Conversation cleared. Ask me any question about your latest storage scan, System Data, or cleanup recommendations."
+                content: "Conversation cleared. Ask me any question about your latest storage scan, System Data, or Delete Hub recommendations."
             )
         ]
     }
@@ -441,7 +549,8 @@ public final class AppState {
                 contextSummary: context,
                 conversationHistory: historySnapshot,
                 apiKey: apiKey,
-                model: geminiModel
+                model: geminiModel,
+                provider: detectedAIProvider
             )
             aiMessages.append(AIMessage(role: .assistant, content: reply))
         } catch {
@@ -454,6 +563,48 @@ public final class AppState {
             )
         }
         isAIThinking = false
+    }
+
+    // MARK: - Check for Updates
+
+    public func checkForUpdates() async {
+        isCheckingForUpdates = true
+        updateStatusMessage = nil
+        availableUpdateURL = nil
+
+        guard let url = URL(string: "https://api.github.com/repos/raymondtian30/MacOS-Storage-Manager/releases/latest") else {
+            isCheckingForUpdates = false
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 10
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tagName = json["tag_name"] as? String else {
+                updateStatusMessage = "You are running SpaceSense v\(Self.currentVersion) (latest)."
+                isCheckingForUpdates = false
+                return
+            }
+
+            let normalizedRemote = tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+            let htmlURLString = json["html_url"] as? String ?? "https://github.com/raymondtian30/MacOS-Storage-Manager/releases"
+
+            if normalizedRemote.compare(Self.currentVersion, options: .numeric) == .orderedDescending {
+                updateStatusMessage = "Update available: \(tagName) (current: v\(Self.currentVersion))"
+                availableUpdateURL = URL(string: htmlURLString)
+            } else {
+                updateStatusMessage = "SpaceSense v\(Self.currentVersion) is up to date."
+            }
+        } catch {
+            updateStatusMessage = "Could not check GitHub Releases (\(error.localizedDescription)). Running v\(Self.currentVersion)."
+        }
+
+        isCheckingForUpdates = false
     }
 
     private func postScanCompletedNotification(result: ScanResult) {

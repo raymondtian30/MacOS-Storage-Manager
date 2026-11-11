@@ -2,39 +2,39 @@ import Foundation
 import SwiftUI
 
 public enum CleanupKind: String, CaseIterable, Codable, Identifiable, Sendable {
-    case oldInstallers = "Disk Images & Installers"
-    case applicationCaches = "Application Caches"
-    case developerArtifacts = "Developer Build Artifacts"
-    case duplicateFiles = "Duplicate File Copies"
+    case unusedLargeFiles = "Unused Large Files"
+    case duplicateFiles = "Exact Duplicates"
+    case applicationCaches = "Caches & Logs"
+    case developerArtifacts = "Developer Artifacts"
+    case oldInstallers = "Installers & Disk Images"
     case oldArchives = "Old Archives"
-    case largeTempFiles = "Temporary & Log Files"
-    case unusedDownloads = "Stale Downloads"
+    case largeTempFiles = "Temp & Scratch Files"
 
     public var id: String { rawValue }
 
     public var icon: String {
         switch self {
-        case .oldInstallers: return "opticaldiscdrive.fill"
+        case .unusedLargeFiles: return "clock.badge.exclamationmark.fill"
+        case .duplicateFiles: return "doc.on.doc.fill"
         case .applicationCaches: return "memorychip.fill"
         case .developerArtifacts: return "wrench.and.screwdriver.fill"
-        case .duplicateFiles: return "doc.on.doc.fill"
+        case .oldInstallers: return "opticaldiscdrive.fill"
         case .oldArchives: return "archivebox.fill"
-        case .largeTempFiles: return "clock.arrow.circlepath"
-        case .unusedDownloads: return "arrow.down.doc.fill"
+        case .largeTempFiles: return "trash.circle.fill"
         }
     }
 }
 
 public enum CleanupSafetyRisk: String, Codable, Sendable {
-    case low = "Low Risk"
-    case moderate = "Moderate — Review"
-    case high = "High — Keep Unless Certain"
+    case low = "Safe to Remove"
+    case moderate = "Review Before Removing"
+    case high = "Keep Unless Certain"
 
     public var color: Color {
         switch self {
-        case .low: return .green
-        case .moderate: return .orange
-        case .high: return .red
+        case .low: return Color(red: 0.20, green: 0.82, blue: 0.64)
+        case .moderate: return Color(red: 0.22, green: 0.68, blue: 0.96)
+        case .high: return Color(red: 0.46, green: 0.54, blue: 0.66)
         }
     }
 }
@@ -46,6 +46,7 @@ public struct CleanupCandidate: Identifiable, Hashable, Sendable {
     public let whatWillBeRemoved: String
     public let locationURL: URL
     public let sizeBytes: Int64
+    public let lastUsedDate: Date?
     public let whyRecommended: String
     public let potentialConsequences: String
     public let risk: CleanupSafetyRisk
@@ -57,6 +58,7 @@ public struct CleanupCandidate: Identifiable, Hashable, Sendable {
         whatWillBeRemoved: String,
         locationURL: URL,
         sizeBytes: Int64,
+        lastUsedDate: Date? = nil,
         whyRecommended: String,
         potentialConsequences: String,
         risk: CleanupSafetyRisk,
@@ -68,6 +70,7 @@ public struct CleanupCandidate: Identifiable, Hashable, Sendable {
         self.whatWillBeRemoved = whatWillBeRemoved
         self.locationURL = locationURL
         self.sizeBytes = sizeBytes
+        self.lastUsedDate = lastUsedDate
         self.whyRecommended = whyRecommended
         self.potentialConsequences = potentialConsequences
         self.risk = risk

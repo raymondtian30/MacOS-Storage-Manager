@@ -55,7 +55,11 @@ public enum SelfTestRunner {
         try expect(stats.totalBytes > 0, "Expected positive boot volume total capacity")
         try expect(stats.usedBytes >= 0, "Expected non-negative used storage")
         try expect(stats.availableBytes >= 0, "Expected non-negative available storage")
-        try expect(NavigationSection.allCases.count == 9, "Expected all 9 required navigation sections")
+        try expect(NavigationSection.allCases.count == 7, "Expected streamlined 7-section navigation with Delete Hub")
+        try expect(AppState.largeFileThresholdOptionsMB.map(\.value) == [250.0, 500.0, 750.0, 1024.0], "Expected 250 MB - 1 GB threshold choices")
+        try expect(AIProvider.detect(from: "AIzaSy123") == .gemini, "Expected Gemini provider auto-detection")
+        try expect(AIProvider.detect(from: "sk-ant-api03-123") == .anthropic, "Expected Anthropic provider auto-detection")
+        try expect(AIProvider.detect(from: "sk-proj-123") == .openai, "Expected OpenAI provider auto-detection")
         try expect(AppAppearanceMode.dark.colorScheme == .dark, "Expected dark scheme")
         try expect(AppAppearanceMode.light.colorScheme == .light, "Expected light scheme")
     }
@@ -113,10 +117,10 @@ public enum SelfTestRunner {
             maxTreeDepth: 5
         )
         let result = try await scanner.scan(rootURL: tempRoot, configuration: config)
-        try expect(result.totalFilesScanned == 2, "Expected 2 regular files scanned without following symlink loop")
-        try expect(result.rootNode.size >= 400_000, "Expected folder size >= 400 KB")
+        try expect(result.totalFilesScanned == 2, "Expected 2 regular files scanned, got \(result.totalFilesScanned)")
+        try expect(result.rootNode.size >= 400_000, "Expected folder size >= 400 KB, got \(result.rootNode.size) (bytesScanned: \(result.categoryBytes.values.reduce(0, +)))")
         try expect(result.largeFiles.count == 1 && result.largeFiles.first?.name == "clip.mov", "Expected clip.mov detected as large file")
-        let cached = await scanner.cachedDirectorySize(for: tempRoot.standardizedFileURL.path)
+        let cached = await scanner.cachedDirectorySize(for: tempRoot.resolvingSymlinksInPath().standardizedFileURL.path)
         try expect(cached != nil, "Expected directory summary cache to be populated")
     }
 

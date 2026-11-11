@@ -7,7 +7,7 @@ public struct ScannerConfiguration: Sendable {
     public var maxTreeDepth: Int
 
     public init(
-        minimumLargeFileBytes: Int64 = 50 * 1024 * 1024, // 50 MB default
+        minimumLargeFileBytes: Int64 = 250 * 1024 * 1024, // 250 MB default
         includeHiddenFiles: Bool = true,
         excludedPaths: Set<String> = [
             "/dev",
@@ -59,23 +59,34 @@ public actor StorageScanner {
     ) async throws -> ScanResult {
         let startTime = Date()
         let standardizedRoot = rootURL.standardizedFileURL
-        let rootPath = standardizedRoot.path
-
-        guard FileManager.default.fileExists(atPath: rootPath) else {
-            throw ScannerError.directoryUnavailable(rootPath)
-        }
+        let rootPath = fastCleanPath(standardizedRoot.path)
 
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: rootPath, isDirectory: &isDir), isDir.boolValue else {
+        guard FileManager.default.fileExists(atPath: rootPath, isDirectory: &isDir) else {
+            throw ScannerError.directoryUnavailable(rootPath)
+        }
+        guard isDir.boolValue else {
             throw ScannerError.notADirectory(rootPath)
         }
-
-        // Check if readable
         guard FileManager.default.isReadableFile(atPath: rootPath) else {
             throw ScannerError.permissionDenied(rootPath)
         }
 
-        var progress = ScanProgress(currentPath: rootPath)
+        let volumeStats = VolumeStats.forURL(standardizedRoot)
+        let normalizedExclusions = Set(
+            configuration.excludedPaths.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        )
+
+        // Pre-list top-level entries to compute accurate scan percentage
+        let topLevelURLs = (try? FileManager.default.contentsOfDirectory(
+            at: standardizedRoot,
+            includingPropertiesForKeys: nil,
+            options: configuration.includeHiddenFiles ? [] : [.skipsHiddenFiles]
+        )) ?? []
+        let totalTopLevelCount = max(topLevelURLs.count, 1)
+        var seenTopLevelPaths: Set<String> = []
+
+        var progress = ScanProgress(currentPath: rootPath, progressFraction: 0.02)
         var categoryBytes: [StorageCategory: Int64] = [:]
         for cat in StorageCategory.allCases {
             categoryBytes[cat] = 0
@@ -84,12 +95,12 @@ public actor StorageScanner {
         var largeFiles: [LargeFileItem] = []
         var allFiles: [LargeFileItem] = []
 
-        // Track directory sizes and direct files to build a clean hierarchy up to maxTreeDepth
-        var dirSizes: [String: Int64] = [rootPath: 0]
-        var dirItemCounts: [String: Int] = [rootPath: 0]
+        // Fast O(1) per-file direct accumulators; rolled up bottom-up at the end
+        var directDirSizes: [String: Int64] = [rootPath: 0]
+        var directDirCounts: [String: Int] = [rootPath: 0]
         var dirModDates: [String: Date] = [:]
         var dirAccessible: [String: Bool] = [rootPath: true]
-        var parentToChildrenDirs: [String: Set<String>] = [:]
+        var parentToChildrenDirs: [String: [String]] = [:]
         var parentToDirectFiles: [String: [FileNode]] = [:]
 
         let resourceKeys: [URLResourceKey] = [
@@ -101,20 +112,18 @@ public actor StorageScanner {
             .totalFileAllocatedSizeKey,
             .fileSizeKey,
             .contentModificationDateKey,
+            .contentAccessDateKey,
             .fileResourceIdentifierKey
         ]
-
-        var seenResourceIDs: Set<Data> = []
-        let normalizedExclusions = Set(
-            configuration.excludedPaths.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
-        )
+        let resourceKeySet = Set(resourceKeys)
 
         var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
         if !configuration.includeHiddenFiles {
             options.insert(.skipsHiddenFiles)
         }
 
-        let rootComponentsCount = standardizedRoot.pathComponents.count
+        let rootSlashCount = countSlashes(in: rootPath)
+        var seenResourceIDs: Set<Data> = []
         var lastProgressEmit = Date.distantPast
 
         let enumerator = FileManager.default.enumerator(
@@ -123,7 +132,7 @@ public actor StorageScanner {
             options: options,
             errorHandler: { url, _ in
                 progress.permissionErrors += 1
-                dirAccessible[url.standardizedFileURL.path] = false
+                dirAccessible[url.path] = false
                 return true
             }
         )
@@ -132,58 +141,51 @@ public actor StorageScanner {
             throw ScannerError.permissionDenied(rootPath)
         }
 
-        while let item = enumerator.nextObject() as? URL {
-            try Task.checkCancellation()
+        while let itemURL = enumerator.nextObject() as? URL {
+            if (progress.filesScanned + progress.directoriesScanned) % 500 == 0 {
+                try Task.checkCancellation()
+            }
 
-            let itemURL = item.standardizedFileURL
-            let itemPath = itemURL.path
+            let itemPath = fastCleanPath(itemURL.path)
 
             if shouldExclude(path: itemPath, rootPath: rootPath, excludedPaths: normalizedExclusions) {
                 enumerator.skipDescendants()
                 continue
             }
 
-            let values: URLResourceValues
-            do {
-                values = try itemURL.resourceValues(forKeys: Set(resourceKeys))
-            } catch {
+            guard let values = try? itemURL.resourceValues(forKeys: resourceKeySet) else {
                 progress.permissionErrors += 1
                 continue
             }
 
             // Never follow symbolic links recursively
             if values.isSymbolicLink == true {
-                if values.isDirectory == true {
-                    enumerator.skipDescendants()
-                }
+                enumerator.skipDescendants()
                 continue
+            }
+
+            let depth = max(1, countSlashes(in: itemPath) - rootSlashCount)
+            if depth == 1 {
+                seenTopLevelPaths.insert(itemPath)
             }
 
             let isDirectory = (values.isDirectory == true) && (values.isPackage != true)
             let isPackage = (values.isPackage == true)
             let modDate = values.contentModificationDate
+            let accessDate = values.contentAccessDate ?? modDate
+            let parentPath = parentDirectoryPath(of: itemPath, fallback: rootPath)
 
             if isDirectory {
                 progress.directoriesScanned += 1
                 progress.currentPath = itemPath
-                dirModDates[itemPath] = modDate
-                if dirSizes[itemPath] == nil {
-                    dirSizes[itemPath] = 0
-                    dirItemCounts[itemPath] = 0
+                if let modDate {
+                    dirModDates[itemPath] = modDate
                 }
-
-                // Register in ancestor chain up to maxTreeDepth
-                let depth = itemURL.pathComponents.count - rootComponentsCount
-                if depth <= configuration.maxTreeDepth {
-                    let parentPath = itemURL.deletingLastPathComponent().standardizedFileURL.path
-                    parentToChildrenDirs[parentPath, default: []].insert(itemPath)
-                }
+                parentToChildrenDirs[parentPath, default: []].append(itemPath)
             } else {
-                // Regular file or bundle/package (.app, .photoslibrary, etc.)
                 let resourceID = (values.fileResourceIdentifier as? NSData).map { Data(referencing: $0) }
                 if !isPackage, let resourceID {
                     if !seenResourceIDs.insert(resourceID).inserted {
-                        // Hard link to an already-counted inode in this scan
                         continue
                     }
                 }
@@ -209,11 +211,16 @@ public actor StorageScanner {
                 let category = StorageCategory.classify(url: itemURL, isDirectory: isPackage)
                 categoryBytes[category, default: 0] += fileSize
 
+                // O(1) direct parent accumulation
+                directDirSizes[parentPath, default: 0] += fileSize
+                directDirCounts[parentPath, default: 0] += 1
+
                 let fileRecord = LargeFileItem(
                     url: itemURL,
                     size: fileSize,
                     logicalSize: logicalSize,
                     modificationDate: modDate,
+                    lastAccessDate: accessDate,
                     category: category,
                     resourceIdentifier: resourceID
                 )
@@ -221,26 +228,11 @@ public actor StorageScanner {
                 if fileSize >= configuration.minimumLargeFileBytes {
                     largeFiles.append(fileRecord)
                 }
-                // Keep regular files (excluding package directories) for duplicate/cleanup candidates
-                if !isPackage && logicalSize > 0 && (logicalSize >= 4096 || allFiles.count < 5_000) && allFiles.count < 100_000 {
+
+                if !isPackage && logicalSize > 0 && (logicalSize >= 8192 || allFiles.count < 5_000) && allFiles.count < 80_000 {
                     allFiles.append(fileRecord)
                 }
 
-                // Propagate size up to rootPath
-                var cursorURL = itemURL.deletingLastPathComponent().standardizedFileURL
-                while true {
-                    let cursorPath = cursorURL.path
-                    dirSizes[cursorPath, default: 0] += fileSize
-                    dirItemCounts[cursorPath, default: 0] += 1
-                    if cursorPath == rootPath || !cursorPath.hasPrefix(rootPath) || cursorPath == "/" {
-                        break
-                    }
-                    cursorURL = cursorURL.deletingLastPathComponent().standardizedFileURL
-                }
-
-                // Attach direct file node if within maxTreeDepth, capping in-memory array per folder
-                let parentPath = itemURL.deletingLastPathComponent().standardizedFileURL.path
-                let depth = itemURL.pathComponents.count - rootComponentsCount
                 if depth <= configuration.maxTreeDepth {
                     let fileNode = FileNode(
                         url: itemURL,
@@ -250,7 +242,7 @@ public actor StorageScanner {
                         category: category
                     )
                     var list = parentToDirectFiles[parentPath] ?? []
-                    if list.count < 120 {
+                    if list.count < 80 {
                         list.append(fileNode)
                         parentToDirectFiles[parentPath] = list
                     } else if let minIdx = list.enumerated().min(by: { $0.element.size < $1.element.size })?.offset,
@@ -261,16 +253,39 @@ public actor StorageScanner {
                 }
             }
 
-            if let onProgress, progress.filesScanned % 250 == 0 {
+            if let onProgress, (progress.filesScanned + progress.directoriesScanned) % 350 == 0 {
                 let now = Date()
-                if now.timeIntervalSince(lastProgressEmit) >= 0.08 {
+                if now.timeIntervalSince(lastProgressEmit) >= 0.12 {
                     lastProgressEmit = now
+                    let topFraction = Double(seenTopLevelPaths.count) / Double(totalTopLevelCount)
+                    let byteFraction = min(0.95, Double(progress.bytesScanned) / Double(max(volumeStats.usedBytes, 1)))
+                    progress.progressFraction = min(0.98, max(0.03, max(topFraction * 0.85, byteFraction)))
                     onProgress(progress)
                 }
             }
         }
 
         try Task.checkCancellation()
+
+        // Roll up directory sizes and Build FileNode tree bottom-up
+        var totalDirSizes: [String: Int64] = [:]
+        var totalDirCounts: [String: Int] = [:]
+
+        let rootNode = buildTreeBottomUp(
+            path: rootPath,
+            currentDepth: 0,
+            maxDepth: configuration.maxTreeDepth,
+            directDirSizes: directDirSizes,
+            directDirCounts: directDirCounts,
+            dirModDates: dirModDates,
+            dirAccessible: dirAccessible,
+            parentToChildrenDirs: parentToChildrenDirs,
+            parentToDirectFiles: parentToDirectFiles,
+            totalDirSizes: &totalDirSizes,
+            totalDirCounts: &totalDirCounts
+        )
+
+        progress.progressFraction = 1.0
         onProgress?(progress)
 
         largeFiles.sort { $0.size > $1.size }
@@ -278,28 +293,21 @@ public actor StorageScanner {
             largeFiles = Array(largeFiles.prefix(500))
         }
 
-        let rootNode = buildTree(
-            at: standardizedRoot,
-            currentDepth: 0,
-            maxDepth: configuration.maxTreeDepth,
-            dirSizes: dirSizes,
-            dirItemCounts: dirItemCounts,
-            dirModDates: dirModDates,
-            dirAccessible: dirAccessible,
-            parentToChildrenDirs: parentToChildrenDirs,
-            parentToDirectFiles: parentToDirectFiles
+        // Cache top 200 largest directory summaries to bound memory
+        directorySummaryCache[rootPath] = DirectoryCacheSnapshot(
+            modificationDate: dirModDates[rootPath],
+            sizeBytes: rootNode.size,
+            itemCount: rootNode.itemCount
         )
-
-        for (dirPath, size) in dirSizes {
-            directorySummaryCache[dirPath] = DirectoryCacheSnapshot(
-                modificationDate: dirModDates[dirPath],
-                sizeBytes: size,
-                itemCount: dirItemCounts[dirPath] ?? 0
+        for child in rootNode.children where child.isDirectory {
+            directorySummaryCache[child.url.path] = DirectoryCacheSnapshot(
+                modificationDate: child.modificationDate,
+                sizeBytes: child.size,
+                itemCount: child.itemCount
             )
         }
 
         let duration = Date().timeIntervalSince(startTime)
-        let volumeStats = VolumeStats.forURL(standardizedRoot)
 
         return ScanResult(
             timestamp: Date(),
@@ -314,6 +322,33 @@ public actor StorageScanner {
             permissionErrorCount: progress.permissionErrors,
             volumeStats: volumeStats
         )
+    }
+
+    private func fastCleanPath(_ path: String) -> String {
+        var result = path
+        if result.hasPrefix("/private/var/") {
+            result = String(result.dropFirst("/private".count))
+        } else if result.hasPrefix("/private/tmp/") {
+            result = String(result.dropFirst("/private".count))
+        }
+        if result.count > 1 && result.hasSuffix("/") {
+            result.removeLast()
+        }
+        return result
+    }
+
+    private func countSlashes(in path: String) -> Int {
+        var count = 0
+        for byte in path.utf8 where byte == 47 { // '/'
+            count += 1
+        }
+        return count
+    }
+
+    private func parentDirectoryPath(of path: String, fallback: String) -> String {
+        guard let lastSlash = path.lastIndex(of: "/") else { return fallback }
+        if lastSlash == path.startIndex { return "/" }
+        return String(path[..<lastSlash])
     }
 
     private func shouldExclude(path: String, rootPath: String, excludedPaths: Set<String>) -> Bool {
@@ -334,6 +369,7 @@ public actor StorageScanner {
             return cached.sizeBytes
         }
         let keys: [URLResourceKey] = [.isSymbolicLinkKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]
+        let keySet = Set(keys)
         guard let enumerator = FileManager.default.enumerator(
             at: packageURL,
             includingPropertiesForKeys: keys,
@@ -345,10 +381,10 @@ public actor StorageScanner {
         var count = 0
         while let fileURL = enumerator.nextObject() as? URL {
             count += 1
-            if count % 250 == 0 && Task.isCancelled {
+            if count % 400 == 0 && Task.isCancelled {
                 return total
             }
-            guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
+            guard let values = try? fileURL.resourceValues(forKeys: keySet),
                   values.isSymbolicLink != true else {
                 continue
             }
@@ -359,60 +395,65 @@ public actor StorageScanner {
         return total
     }
 
-    private func buildTree(
-        at url: URL,
+    private func buildTreeBottomUp(
+        path: String,
         currentDepth: Int,
         maxDepth: Int,
-        dirSizes: [String: Int64],
-        dirItemCounts: [String: Int],
+        directDirSizes: [String: Int64],
+        directDirCounts: [String: Int],
         dirModDates: [String: Date],
         dirAccessible: [String: Bool],
-        parentToChildrenDirs: [String: Set<String>],
-        parentToDirectFiles: [String: [FileNode]]
+        parentToChildrenDirs: [String: [String]],
+        parentToDirectFiles: [String: [FileNode]],
+        totalDirSizes: inout [String: Int64],
+        totalDirCounts: inout [String: Int]
     ) -> FileNode {
-        let path = url.path
-        let totalSize = dirSizes[path] ?? 0
-        let count = dirItemCounts[path] ?? 0
-        let modDate = dirModDates[path]
-        let accessible = dirAccessible[path] ?? true
+        var totalSize = directDirSizes[path] ?? 0
+        var totalCount = directDirCounts[path] ?? 0
+        var childrenNodes: [FileNode] = []
 
-        var children: [FileNode] = []
-        if currentDepth < maxDepth {
-            if let childDirPaths = parentToChildrenDirs[path] {
-                for childPath in childDirPaths {
-                    let childURL = URL(fileURLWithPath: childPath)
-                    let childNode = buildTree(
-                        at: childURL,
-                        currentDepth: currentDepth + 1,
-                        maxDepth: maxDepth,
-                        dirSizes: dirSizes,
-                        dirItemCounts: dirItemCounts,
-                        dirModDates: dirModDates,
-                        dirAccessible: dirAccessible,
-                        parentToChildrenDirs: parentToChildrenDirs,
-                        parentToDirectFiles: parentToDirectFiles
-                    )
-                    if childNode.size > 0 || !childNode.isAccessible {
-                        children.append(childNode)
-                    }
+        if let childDirPaths = parentToChildrenDirs[path] {
+            for childPath in childDirPaths {
+                let childNode = buildTreeBottomUp(
+                    path: childPath,
+                    currentDepth: currentDepth + 1,
+                    maxDepth: maxDepth,
+                    directDirSizes: directDirSizes,
+                    directDirCounts: directDirCounts,
+                    dirModDates: dirModDates,
+                    dirAccessible: dirAccessible,
+                    parentToChildrenDirs: parentToChildrenDirs,
+                    parentToDirectFiles: parentToDirectFiles,
+                    totalDirSizes: &totalDirSizes,
+                    totalDirCounts: &totalDirCounts
+                )
+                totalSize += childNode.size
+                totalCount += childNode.itemCount
+                if currentDepth < maxDepth && (childNode.size > 0 || !childNode.isAccessible) {
+                    childrenNodes.append(childNode)
                 }
             }
-            if let directFiles = parentToDirectFiles[path] {
-                let sortedFiles = directFiles.sorted { $0.size > $1.size }
-                children.append(contentsOf: sortedFiles.prefix(60))
-            }
-            children.sort { $0.size > $1.size }
         }
 
+        if currentDepth < maxDepth, let directFiles = parentToDirectFiles[path] {
+            let sortedFiles = directFiles.sorted { $0.size > $1.size }
+            childrenNodes.append(contentsOf: sortedFiles.prefix(50))
+            childrenNodes.sort { $0.size > $1.size }
+        }
+
+        totalDirSizes[path] = totalSize
+        totalDirCounts[path] = totalCount
+
+        let url = URL(fileURLWithPath: path)
         return FileNode(
             url: url,
             isDirectory: true,
             size: totalSize,
-            modificationDate: modDate,
+            modificationDate: dirModDates[path],
             category: StorageCategory.classify(url: url, isDirectory: true),
-            itemCount: count,
-            isAccessible: accessible,
-            children: children
+            itemCount: totalCount,
+            isAccessible: dirAccessible[path] ?? true,
+            children: childrenNodes
         )
     }
 }

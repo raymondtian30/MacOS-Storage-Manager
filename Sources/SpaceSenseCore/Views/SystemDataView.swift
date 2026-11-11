@@ -13,7 +13,7 @@ public struct SystemDataView: View {
                 HStack {
                     SectionHeaderBar(
                         title: "System Data Analyzer",
-                        subtitle: "Transparent breakdown of measured caches, developer artifacts, estimated snapshots, and protected system folders",
+                        subtitle: "Breakdown of measured caches, developer artifacts, estimated snapshots, and protected system folders",
                         icon: NavigationSection.systemData.icon
                     )
 
@@ -29,8 +29,6 @@ public struct SystemDataView: View {
                     .tint(SpaceSenseTheme.accent)
                     .disabled(appState.isAnalyzingSystemData)
                 }
-
-                transparencyNoticeCard
 
                 if let report = appState.systemDataReport {
                     summaryCards(report: report)
@@ -51,24 +49,6 @@ public struct SystemDataView: View {
         }
     }
 
-    private var transparencyNoticeCard: some View {
-        SurfaceCard(padding: 14) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "info.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(SpaceSenseTheme.accent)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Understanding macOS System Data")
-                        .font(.subheadline.weight(.semibold))
-                    Text("macOS System Data is not a single folder. It spans user library caches, developer build artifacts, APFS local snapshots, virtual memory swap, and SIP-protected OS components. SpaceSense clearly distinguishes **Directly Measured** paths from **Estimated** volume overhead and **Permission-Restricted** directories, and never modifies protected macOS system files.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-        }
-    }
-
     private func summaryCards(report: SystemDataReport) -> some View {
         LazyVGrid(
             columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 4),
@@ -79,28 +59,30 @@ public struct SystemDataView: View {
                 value: ByteFormatting.string(report.totalMeasuredBytes),
                 subtitle: "Directly measured on disk",
                 icon: "checkmark.circle.fill",
-                tint: .green
+                tint: SpaceSenseTheme.secondaryAccent
             )
             MetricCardView(
                 title: "Safely Cleanable",
                 value: ByteFormatting.string(report.cleanableBytes),
                 subtitle: "Caches, logs & DerivedData",
-                icon: "sparkles",
+                icon: "trash.slash.fill",
                 tint: SpaceSenseTheme.secondaryAccent
             )
             MetricCardView(
                 title: "Estimated Unindexed / VM",
                 value: ByteFormatting.string(report.estimatedUnindexedSystemBytes),
-                subtitle: "APFS snapshots & unscanned paths",
+                subtitle: "APFS snapshots & swap",
                 icon: "waveform.path.ecg",
-                tint: .orange
+                tint: SpaceSenseTheme.accent,
+                tooltip: "macOS System Data includes APFS local snapshots, virtual memory swapfiles, and root-only folders that cannot be enumerated directly by standard user apps."
             )
             MetricCardView(
                 title: "Restricted Locations",
                 value: "\(report.inaccessiblePathCount)",
-                subtitle: "Protected by SIP or permissions",
+                subtitle: "SIP or Full Disk Access",
                 icon: "lock.shield.fill",
-                tint: .secondary
+                tint: SpaceSenseTheme.slate,
+                tooltip: "Directories protected by Apple System Integrity Protection (SIP) or requiring Full Disk Access in System Settings."
             )
         }
     }
@@ -108,78 +90,70 @@ public struct SystemDataView: View {
     private func itemsListCard(report: SystemDataReport) -> some View {
         SurfaceCard {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Inspected System & Library Locations")
-                    .font(.headline)
+                HStack {
+                    Text("Inspected System & Library Locations")
+                        .font(.headline)
+                    InfoTooltipIcon("Measured paths are calculated directly from filesystem metadata. Estimated paths represent volume usage outside accessible folders.")
+                    Spacer()
+                }
 
                 ForEach(report.items) { item in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(alignment: .top, spacing: 10) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 8) {
-                                    Text(item.category)
-                                        .font(.subheadline.weight(.bold))
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text(item.category)
+                                    .font(.subheadline.weight(.bold))
 
-                                    Text(item.measurability.rawValue)
-                                        .font(.caption2.weight(.semibold))
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(item.measurability.badgeColor.opacity(0.18), in: Capsule())
-                                        .foregroundStyle(item.measurability.badgeColor)
+                                Text(item.measurability.rawValue)
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(item.measurability.badgeColor.opacity(0.16), in: Capsule())
+                                    .foregroundStyle(item.measurability.badgeColor)
 
-                                    Text(item.recommendation.rawValue)
-                                        .font(.caption2.weight(.semibold))
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(item.recommendation.color.opacity(0.16), in: Capsule())
-                                        .foregroundStyle(item.recommendation.color)
+                                Text(item.recommendation.rawValue)
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(item.recommendation.color.opacity(0.16), in: Capsule())
+                                    .foregroundStyle(item.recommendation.color)
+
+                                if item.recommendation != .recommended {
+                                    InfoTooltipIcon("\(item.explanation) Risk: \(item.potentialRisks)")
                                 }
-
-                                Text(item.locationPath)
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
                             }
 
-                            Spacer()
+                            Text(item.locationPath)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(SpaceSenseTheme.slate)
+                                .textSelection(.enabled)
 
-                            Text(item.sizeBytes.map { ByteFormatting.string($0) } ?? "Restricted")
-                                .font(.subheadline.monospacedDigit().weight(.bold))
-                                .foregroundStyle(item.sizeBytes == nil ? .secondary : .primary)
-
-                            if let url = item.url {
-                                Button {
-                                    appState.revealInFinder(url)
-                                } label: {
-                                    Label("Finder", systemImage: "folder")
-                                        .font(.caption)
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                            }
+                            Text(item.explanation)
+                                .font(.caption)
+                                .foregroundStyle(SpaceSenseTheme.slate)
                         }
 
-                        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 4) {
-                            GridRow {
-                                Text("Explanation:")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                Text(item.explanation)
+                        Spacer()
+
+                        Text(item.sizeBytes.map { ByteFormatting.string($0) } ?? "Restricted")
+                            .font(.subheadline.monospacedDigit().weight(.bold))
+                            .foregroundStyle(item.sizeBytes == nil ? SpaceSenseTheme.slate : .primary)
+
+                        if let url = item.url {
+                            Button {
+                                appState.revealInFinder(url)
+                            } label: {
+                                Label("Finder", systemImage: "folder")
                                     .font(.caption)
                             }
-                            GridRow {
-                                Text("Potential Risks:")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                Text(item.potentialRisks)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
                     }
                     .padding(12)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.primary.opacity(0.035))
+                            .fill(SpaceSenseTheme.slate.opacity(0.06))
                     )
                 }
             }

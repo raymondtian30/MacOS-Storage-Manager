@@ -4,10 +4,8 @@ import SwiftUI
 public enum NavigationSection: String, CaseIterable, Identifiable, Sendable {
     case overview = "Overview"
     case analyzer = "Storage Analyzer"
-    case largeFiles = "Large Files"
-    case duplicates = "Duplicate Finder"
+    case deleteHub = "Delete Hub"
     case systemData = "System Data"
-    case smartCleanup = "Smart Cleanup"
     case history = "Storage History"
     case aiAssistant = "AI Assistant"
     case settings = "Settings"
@@ -18,12 +16,10 @@ public enum NavigationSection: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .overview: return "gauge.with.dots.needle.bottom.50percent"
         case .analyzer: return "square.grid.3x2.fill"
-        case .largeFiles: return "arrow.up.doc.fill"
-        case .duplicates: return "doc.on.doc.fill"
+        case .deleteHub: return "trash.slash.fill"
         case .systemData: return "externaldrive.fill.badge.timemachine"
-        case .smartCleanup: return "sparkles"
         case .history: return "chart.xyaxis.line"
-        case .aiAssistant: return "brain.head.profile"
+        case .aiAssistant: return "sparkles.rectangle.stack.fill"
         case .settings: return "gearshape.fill"
         }
     }
@@ -32,13 +28,11 @@ public enum NavigationSection: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .overview: return "Disk health, category breakdown, and recent activity"
         case .analyzer: return "Interactive treemap and hierarchical folder browser"
-        case .largeFiles: return "Find, filter, preview, and manage the largest files"
-        case .duplicates: return "Locate exact duplicate files using SHA-256 hashing"
+        case .deleteHub: return "Unified hub for unused large files, duplicates, caches, and safe cleanup"
         case .systemData: return "Inspect caches, logs, developer artifacts, and system folders"
-        case .smartCleanup: return "Safe, reviewable recommendations to reclaim space"
         case .history: return "Track storage utilization and growing folders over time"
-        case .aiAssistant: return "Ask Gemini questions grounded in your actual scan data"
-        case .settings: return "Configure API keys, scan exclusions, and privacy options"
+        case .aiAssistant: return "Ask your AI model questions grounded in actual scan data"
+        case .settings: return "API keys, thresholds, scan exclusions, updates, and credits"
         }
     }
 }
@@ -66,15 +60,16 @@ public enum StorageCategory: String, CaseIterable, Codable, Identifiable, Sendab
         }
     }
 
+    /// Cohesive 3-color palette (Electric Cyan, Emerald Mint, and Cool Slate tones)
     public var color: Color {
         switch self {
-        case .applications: return Color(red: 0.25, green: 0.56, blue: 0.98)
-        case .documents: return Color(red: 0.35, green: 0.78, blue: 0.62)
-        case .downloads: return Color(red: 0.64, green: 0.44, blue: 0.97)
-        case .photosAndMedia: return Color(red: 0.96, green: 0.45, blue: 0.58)
-        case .developer: return Color(red: 0.97, green: 0.65, blue: 0.22)
-        case .systemData: return Color(red: 0.52, green: 0.58, blue: 0.68)
-        case .other: return Color(red: 0.38, green: 0.72, blue: 0.88)
+        case .applications: return Color(red: 0.22, green: 0.68, blue: 0.96)
+        case .documents: return Color(red: 0.20, green: 0.82, blue: 0.64)
+        case .downloads: return Color(red: 0.22, green: 0.68, blue: 0.96).opacity(0.78)
+        case .photosAndMedia: return Color(red: 0.20, green: 0.82, blue: 0.64).opacity(0.78)
+        case .developer: return Color(red: 0.22, green: 0.68, blue: 0.96).opacity(0.58)
+        case .systemData: return Color(red: 0.46, green: 0.54, blue: 0.66)
+        case .other: return Color(red: 0.46, green: 0.54, blue: 0.66).opacity(0.68)
         }
     }
 
@@ -250,6 +245,7 @@ public struct LargeFileItem: Identifiable, Hashable, Sendable {
     public let size: Int64
     public let logicalSize: Int64
     public let modificationDate: Date?
+    public let lastAccessDate: Date?
     public let fileExtension: String
     public let category: StorageCategory
     public let resourceIdentifier: Data?
@@ -259,6 +255,7 @@ public struct LargeFileItem: Identifiable, Hashable, Sendable {
         size: Int64,
         logicalSize: Int64? = nil,
         modificationDate: Date?,
+        lastAccessDate: Date? = nil,
         category: StorageCategory? = nil,
         resourceIdentifier: Data? = nil
     ) {
@@ -269,9 +266,22 @@ public struct LargeFileItem: Identifiable, Hashable, Sendable {
         self.size = size
         self.logicalSize = logicalSize ?? size
         self.modificationDate = modificationDate
+        self.lastAccessDate = lastAccessDate ?? modificationDate
         self.fileExtension = url.pathExtension.lowercased()
         self.category = category ?? StorageCategory.classify(url: url, isDirectory: false)
         self.resourceIdentifier = resourceIdentifier
+    }
+
+    public var lastUsedDate: Date? {
+        if let access = lastAccessDate, let mod = modificationDate {
+            return max(access, mod)
+        }
+        return lastAccessDate ?? modificationDate
+    }
+
+    public func daysSinceLastOpened(from referenceDate: Date = Date()) -> Int {
+        guard let lastUsed = lastUsedDate else { return 0 }
+        return max(0, Int(referenceDate.timeIntervalSince(lastUsed) / 86_400))
     }
 }
 
@@ -330,19 +340,26 @@ public struct ScanProgress: Sendable {
     public var bytesScanned: Int64
     public var currentPath: String
     public var permissionErrors: Int
+    public var progressFraction: Double
+
+    public var percent: Double {
+        min(100.0, max(0.0, progressFraction * 100.0))
+    }
 
     public init(
         filesScanned: Int = 0,
         directoriesScanned: Int = 0,
         bytesScanned: Int64 = 0,
         currentPath: String = "",
-        permissionErrors: Int = 0
+        permissionErrors: Int = 0,
+        progressFraction: Double = 0.0
     ) {
         self.filesScanned = filesScanned
         self.directoriesScanned = directoriesScanned
         self.bytesScanned = bytesScanned
         self.currentPath = currentPath
         self.permissionErrors = permissionErrors
+        self.progressFraction = min(1.0, max(0.0, progressFraction))
     }
 }
 

@@ -17,12 +17,8 @@ public struct SmartCleanupEngine: Sendable {
 
     public init() {}
 
-    public static func isProtectedSystemPath(_ path: String) -> Bool {
-        let url = URL(fileURLWithPath: path)
-        let standardized = url.standardizedFileURL.path
-        let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
-        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
-
+    public static func isProtectedSystemPath(_ path: String, resolveSymlinks: Bool = false) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
         let exactProtected: Set<String> = [
             "/",
             "/Applications",
@@ -44,7 +40,14 @@ public struct SmartCleanupEngine: Sendable {
             "\(home)/Library/Containers"
         ]
 
-        for candidate in [standardized, resolved] {
+        var candidates = [cleanTrailingSlash(path)]
+        if resolveSymlinks {
+            let url = URL(fileURLWithPath: path)
+            candidates.append(url.standardizedFileURL.path)
+            candidates.append(url.resolvingSymlinksInPath().standardizedFileURL.path)
+        }
+
+        for candidate in candidates {
             if exactProtected.contains(candidate) {
                 return true
             }
@@ -61,24 +64,35 @@ public struct SmartCleanupEngine: Sendable {
         return false
     }
 
+    private static func cleanTrailingSlash(_ path: String) -> String {
+        guard path.count > 1 && path.hasSuffix("/") else { return path }
+        return String(path.dropLast())
+    }
+
+    /// Runs pure in-memory analysis without synchronous filesystem syscalls so it never blocks the UI.
     public func buildRecommendations(
         scanResult: ScanResult?,
         systemDataReport: SystemDataReport?,
-        duplicateGroups: [DuplicateGroup]
+        duplicateGroups: [DuplicateGroup],
+        unusedDaysThreshold: Int = 90,
+        largeFileThresholdBytes: Int64 = 250 * 1024 * 1024
     ) -> [CleanupCandidate] {
         var candidates: [CleanupCandidate] = []
         var seenPaths: Set<String> = []
         let now = Date()
 
-        // 1. Inspect scanned files for installers, archives, temp files, and stale downloads
+        // 1. Inspect scanned files for installers, archives, temp files, and unused large files
         if let scanResult {
             for file in scanResult.allFiles {
-                let path = file.url.standardizedFileURL.path
-                guard !Self.isProtectedSystemPath(path), !seenPaths.contains(path) else { continue }
+                let path = file.path
+                guard !Self.isProtectedSystemPath(path, resolveSymlinks: false),
+                      !seenPaths.contains(path) else {
+                    continue
+                }
 
-                let ext = file.fileExtension.lowercased()
+                let ext = file.fileExtension
                 let lowerPath = path.lowercased()
-                let ageDays = file.modificationDate.map { now.timeIntervalSince($0) / 86_400 } ?? 0
+                let daysUnused = file.daysSinceLastOpened(from: now)
 
                 // Old Disk Images & Package Installers (.dmg, .pkg, .iso) >= 10 MB
                 if ["dmg", "pkg", "iso"].contains(ext), file.size >= 10 * 1024 * 1024 {
@@ -91,32 +105,11 @@ public struct SmartCleanupEngine: Sendable {
                             whatWillBeRemoved: "Disk image or installer package '\(file.name)'",
                             locationURL: file.url,
                             sizeBytes: file.size,
-                            whyRecommended: "Installer packages and disk images are typically no longer needed after the application has been installed into /Applications.",
-                            potentialConsequences: "If you need to reinstall this version offline later, you would need to download the installer again.",
+                            lastUsedDate: file.lastUsedDate,
+                            whyRecommended: "Installer packages and disk images are no longer needed once the app is installed in /Applications.",
+                            potentialConsequences: "If you need to reinstall offline later, you would re-download the installer.",
                             risk: isInDownloads ? .low : .moderate,
                             isSelected: isInDownloads
-                        )
-                    )
-                    continue
-                }
-
-                // Old Archives (.zip, .tar.gz, .tgz, .7z, .rar) in Downloads older than 30 days and >= 25 MB
-                if ["zip", "gz", "tgz", "7z", "rar", "tar"].contains(ext),
-                   lowerPath.contains("/downloads/"),
-                   ageDays >= 30,
-                   file.size >= 25 * 1024 * 1024 {
-                    seenPaths.insert(path)
-                    candidates.append(
-                        CleanupCandidate(
-                            kind: .oldArchives,
-                            title: "Old Archive: \(file.name)",
-                            whatWillBeRemoved: "Compressed archive '\(file.name)' in Downloads",
-                            locationURL: file.url,
-                            sizeBytes: file.size,
-                            whyRecommended: "This compressed archive in Downloads has not been modified for over \(Int(ageDays)) days and may already be extracted.",
-                            potentialConsequences: "Verify that you have already extracted and saved any important files from this archive before moving it to Trash.",
-                            risk: .moderate,
-                            isSelected: false
                         )
                     )
                     continue
@@ -128,12 +121,13 @@ public struct SmartCleanupEngine: Sendable {
                     candidates.append(
                         CleanupCandidate(
                             kind: .largeTempFiles,
-                            title: "Large Log/Temp File: \(file.name)",
+                            title: "Log / Temp File: \(file.name)",
                             whatWillBeRemoved: "Temporary or diagnostic log file '\(file.name)'",
                             locationURL: file.url,
                             sizeBytes: file.size,
-                            whyRecommended: "Large log and temporary scratch files accumulate over time and are not required for normal application operation.",
-                            potentialConsequences: "Historical diagnostic log entries in this file will no longer be available unless restored from Trash.",
+                            lastUsedDate: file.lastUsedDate,
+                            whyRecommended: "Large scratch and log files accumulate over time and are not required for normal app operation.",
+                            potentialConsequences: "Past diagnostic log entries in this file will be moved to Trash.",
                             risk: .low,
                             isSelected: true
                         )
@@ -141,21 +135,45 @@ public struct SmartCleanupEngine: Sendable {
                     continue
                 }
 
-                // Stale large Downloads (> 90 days old, >= 100 MB)
-                if lowerPath.contains("/downloads/"),
-                   ageDays >= 90,
-                   file.size >= 100 * 1024 * 1024 {
+                // Old Archives (.zip, .tar.gz, .tgz, .7z, .rar) in Downloads unused for >= 30 days and >= 25 MB
+                if ["zip", "gz", "tgz", "7z", "rar", "tar"].contains(ext),
+                   lowerPath.contains("/downloads/"),
+                   daysUnused >= 30,
+                   file.size >= 25 * 1024 * 1024 {
                     seenPaths.insert(path)
                     candidates.append(
                         CleanupCandidate(
-                            kind: .unusedDownloads,
-                            title: "Stale Download: \(file.name)",
-                            whatWillBeRemoved: "Downloaded file '\(file.name)' (last modified \(Int(ageDays)) days ago)",
+                            kind: .oldArchives,
+                            title: "Archive: \(file.name)",
+                            whatWillBeRemoved: "Compressed archive '\(file.name)' (unused for \(daysUnused) days)",
                             locationURL: file.url,
                             sizeBytes: file.size,
-                            whyRecommended: "Large file in your Downloads folder untouched for more than 3 months.",
-                            potentialConsequences: "The file will be moved to Trash. Review to ensure it is not an important personal document.",
-                            risk: .moderate,
+                            lastUsedDate: file.lastUsedDate,
+                            whyRecommended: "Compressed archive in Downloads untouched for \(daysUnused) days and likely already extracted.",
+                            potentialConsequences: "Verify that extracted contents are saved elsewhere before moving to Trash.",
+                            risk: .low,
+                            isSelected: false
+                        )
+                    )
+                    continue
+                }
+
+                // Large files that haven't been opened or used in >= unusedDaysThreshold days
+                let effectiveMinSize = min(largeFileThresholdBytes, 100 * 1024 * 1024)
+                if file.size >= effectiveMinSize, daysUnused >= unusedDaysThreshold {
+                    seenPaths.insert(path)
+                    let isLowRiskLocation = lowerPath.contains("/downloads/") || lowerPath.contains("/movies/")
+                    candidates.append(
+                        CleanupCandidate(
+                            kind: .unusedLargeFiles,
+                            title: "Unused (\(daysUnused)d): \(file.name)",
+                            whatWillBeRemoved: "Large file '\(file.name)' — not opened or modified for \(daysUnused) days",
+                            locationURL: file.url,
+                            sizeBytes: file.size,
+                            lastUsedDate: file.lastUsedDate,
+                            whyRecommended: "Occupies \(ByteFormatting.string(file.size)) and has not been opened or used in \(daysUnused) days (threshold: \(unusedDaysThreshold) days).",
+                            potentialConsequences: "Moved to macOS Trash; review if this is an archival media or backup file you still need.",
+                            risk: isLowRiskLocation ? .low : .moderate,
                             isSelected: false
                         )
                     )
@@ -163,13 +181,13 @@ public struct SmartCleanupEngine: Sendable {
             }
         }
 
-        // 2. Include safe measured System Data candidates (Xcode DerivedData, User Logs, Homebrew cache)
+        // 2. Include safe measured System Data candidates (Xcode DerivedData, User Caches, Logs, Homebrew cache)
         if let systemDataReport {
             for item in systemDataReport.items where item.isUserCleanable && item.recommendation == .recommended {
                 guard let url = item.url,
                       let size = item.sizeBytes,
                       size >= 5 * 1024 * 1024,
-                      !Self.isProtectedSystemPath(url.path),
+                      !Self.isProtectedSystemPath(url.path, resolveSymlinks: false),
                       !seenPaths.contains(url.path) else {
                     continue
                 }
@@ -182,6 +200,7 @@ public struct SmartCleanupEngine: Sendable {
                         whatWillBeRemoved: "Contents of \(item.category) at \(item.locationPath)",
                         locationURL: url,
                         sizeBytes: size,
+                        lastUsedDate: nil,
                         whyRecommended: item.explanation,
                         potentialConsequences: item.potentialRisks,
                         risk: .low,
@@ -194,8 +213,11 @@ public struct SmartCleanupEngine: Sendable {
         // 3. Include duplicate file copies marked for removal
         for group in duplicateGroups {
             for dup in group.files where dup.isMarkedForRemoval {
-                let path = dup.url.standardizedFileURL.path
-                guard !Self.isProtectedSystemPath(path), !seenPaths.contains(path) else { continue }
+                let path = dup.path
+                guard !Self.isProtectedSystemPath(path, resolveSymlinks: false),
+                      !seenPaths.contains(path) else {
+                    continue
+                }
                 seenPaths.insert(path)
                 candidates.append(
                     CleanupCandidate(
@@ -204,8 +226,9 @@ public struct SmartCleanupEngine: Sendable {
                         whatWillBeRemoved: "Redundant byte-identical copy '\(dup.name)' (SHA-256 verified)",
                         locationURL: dup.url,
                         sizeBytes: dup.size,
-                        whyRecommended: "An identical file with the exact same SHA-256 cryptographic hash is preserved in another location.",
-                        potentialConsequences: "Only this redundant copy is moved to Trash; the primary copy remains untouched.",
+                        lastUsedDate: dup.modificationDate,
+                        whyRecommended: "An identical original file with the exact same SHA-256 hash is preserved in another folder.",
+                        potentialConsequences: "Only this redundant duplicate is moved to Trash; the original copy remains untouched.",
                         risk: .low,
                         isSelected: true
                     )
@@ -217,15 +240,14 @@ public struct SmartCleanupEngine: Sendable {
         return candidates
     }
 
-    /// Safely moves selected URLs to the macOS Trash using `NSWorkspace.shared.recycle`
-    /// (falling back to `FileManager.default.trashItem` when needed). Never permanently deletes files.
+    /// Safely moves selected URLs to the macOS Trash. Never permanently deletes files.
     public func moveItemsToTrash(urls: [URL], itemSizes: [URL: Int64] = [:]) async -> CleanupExecutionResult {
         var safeURLs: [URL] = []
         var failures: [(path: String, reason: String)] = []
 
         for url in urls {
             let path = url.standardizedFileURL.path
-            if Self.isProtectedSystemPath(path) {
+            if Self.isProtectedSystemPath(path, resolveSymlinks: true) {
                 failures.append((path: path, reason: "Protected macOS system path cannot be modified."))
                 continue
             }
@@ -250,7 +272,6 @@ public struct SmartCleanupEngine: Sendable {
             "/private/var/tmp"
         ]
 
-        // Sort shortest path first and skip children whose parent is already in safeURLs
         let sortedSafeURLs = safeURLs.sorted { $0.standardizedFileURL.path.count < $1.standardizedFileURL.path.count }
         var processedParentPaths: [String] = []
 
@@ -263,7 +284,6 @@ public struct SmartCleanupEngine: Sendable {
 
             let size = itemSizes[url] ?? (Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0))
 
-            // If url is a standard system container directory (like ~/Library/Caches), trash its child items rather than the container root
             if containerRootsToKeepIntact.contains(path),
                let children = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) {
                 var childMoved = 0
@@ -288,7 +308,6 @@ public struct SmartCleanupEngine: Sendable {
                 movedCount += 1
                 reclaimed += size
             } catch {
-                // Fallback to NSWorkspace recycle for single URL
                 let recycled = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                     NSWorkspace.shared.recycle([url]) { newURLs, recycleError in
                         continuation.resume(returning: recycleError == nil && !newURLs.isEmpty)
