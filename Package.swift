@@ -39,7 +39,19 @@ let package = Package(
         .testTarget(
             name: "SpaceSenseTests",
             dependencies: ["SpaceSenseCore"],
-            path: "Tests/SpaceSenseTests"
+            path: "Tests/SpaceSenseTests",
+            swiftSettings: [
+                .unsafeFlags(["-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks"])
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/usr/lib"
+                ])
+            ]
         )
     ]
 )

@@ -13,8 +13,13 @@ public actor SystemDataAnalyzer {
 
     public init() {}
 
-    public func analyze(volumeStats: VolumeStats, knownScanBytes: Int64? = nil) async -> SystemDataReport {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+    public func analyze(
+        volumeStats: VolumeStats,
+        knownScanBytes: Int64? = nil,
+        customHomeURL: URL? = nil,
+        maxFilesPerLocation: Int = 12_000
+    ) async -> SystemDataReport {
+        let home = (customHomeURL ?? FileManager.default.homeDirectoryForCurrentUser).path
         let specs: [ProbeSpec] = [
             ProbeSpec(
                 category: "User Application Caches",
@@ -194,7 +199,7 @@ public actor SystemDataAnalyzer {
                 continue
             }
 
-            let (size, hadPermissionIssue) = measureDirectoryBytes(at: url, maxFiles: 60_000)
+            let (size, hadPermissionIssue) = measureDirectoryBytes(at: url, maxFiles: maxFilesPerLocation)
             totalMeasured += size
             if hadPermissionIssue {
                 restrictedCount += 1
@@ -244,7 +249,7 @@ public actor SystemDataAnalyzer {
         )
     }
 
-    private func measureDirectoryBytes(at directoryURL: URL, maxFiles: Int) -> (Int64, Bool) {
+    private func measureDirectoryBytes(at directoryURL: URL, maxFiles: Int, maxSeconds: TimeInterval = 0.6) -> (Int64, Bool) {
         let keys: [URLResourceKey] = [
             .isSymbolicLinkKey,
             .totalFileAllocatedSizeKey,
@@ -264,11 +269,12 @@ public actor SystemDataAnalyzer {
             return (0, true)
         }
 
+        let deadline = Date().addingTimeInterval(maxSeconds)
         var total: Int64 = 0
         var count = 0
         while let fileURL = enumerator.nextObject() as? URL {
             count += 1
-            if count > maxFiles {
+            if count > maxFiles || (count % 256 == 0 && Date() >= deadline) {
                 break
             }
             guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),

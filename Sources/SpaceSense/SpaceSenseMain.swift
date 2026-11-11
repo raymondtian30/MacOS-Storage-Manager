@@ -58,7 +58,6 @@ public final class SpaceSenseAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-@main
 struct SpaceSenseApp: App {
     @NSApplicationDelegateAdaptor(SpaceSenseAppDelegate.self) private var appDelegate
     @State private var appState = AppState()
@@ -89,5 +88,16 @@ struct SpaceSenseApp: App {
                 .keyboardShortcut("d", modifiers: [.command, .shift])
             }
         }
+    }
+}
+
+@main
+enum SpaceSenseLauncher {
+    static func main() async {
+        if CommandLine.arguments.contains("--self-test") {
+            let passed = await SelfTestRunner.runAllTests()
+            Foundation.exit(passed ? 0 : 1)
+        }
+        SpaceSenseApp.main()
     }
 }
