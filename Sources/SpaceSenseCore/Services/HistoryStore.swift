@@ -24,7 +24,7 @@ public final class HistoryStore: @unchecked Sendable {
 
     deinit {
         if let db {
-            sqlite3_close(db)
+            sqlite3_close_v2(db)
         }
     }
 
@@ -33,9 +33,14 @@ public final class HistoryStore: @unchecked Sendable {
         defer { lock.unlock() }
         if sqlite3_open(databasePath, &db) != SQLITE_OK {
             if let db {
-                sqlite3_close(db)
+                sqlite3_close_v2(db)
             }
             db = nil
+            return
+        }
+        if let db {
+            sqlite3_busy_timeout(db, 5000)
+            sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nil, nil, nil)
         }
     }
 
@@ -68,7 +73,10 @@ public final class HistoryStore: @unchecked Sendable {
         }
 
         var topFoldersMap: [String: Int64] = [:]
-        for child in result.rootNode.children.filter(\.isDirectory).prefix(15) {
+        let sortedDirs = result.rootNode.children
+            .filter(\.isDirectory)
+            .sorted { $0.size > $1.size }
+        for child in sortedDirs.prefix(20) {
             topFoldersMap[child.url.path] = child.size
         }
 
@@ -94,7 +102,7 @@ public final class HistoryStore: @unchecked Sendable {
         defer { sqlite3_finalize(stmt) }
 
         let ts = result.timestamp.timeIntervalSince1970
-        let path = result.rootURL.path
+        let path = result.rootURL.standardizedFileURL.path
         let sqlTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
         sqlite3_bind_double(stmt, 1, ts)
@@ -143,7 +151,7 @@ public final class HistoryStore: @unchecked Sendable {
             return []
         }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(limit))
+        sqlite3_bind_int64(stmt, 1, Int64(max(1, limit)))
 
         var snapshots: [ScanHistorySnapshot] = []
         let decoder = JSONDecoder()
@@ -187,8 +195,10 @@ public final class HistoryStore: @unchecked Sendable {
         }
 
         var deltas: [StorageGrowthDelta] = []
+        let allCategoryKeys = Set(latest.categoryBreakdown.keys).union(previous.categoryBreakdown.keys)
 
-        for (catName, currentBytes) in latest.categoryBreakdown {
+        for catName in allCategoryKeys {
+            let currentBytes = latest.categoryBreakdown[catName] ?? 0
             let prevBytes = previous.categoryBreakdown[catName] ?? 0
             if currentBytes != prevBytes {
                 deltas.append(
@@ -202,9 +212,9 @@ public final class HistoryStore: @unchecked Sendable {
             }
         }
 
+        // Compare folders recorded in both snapshots so rankings entering/leaving top 20 don't create false spikes
         for (folderPath, currentBytes) in latest.topFolders {
-            let prevBytes = previous.topFolders[folderPath] ?? 0
-            if currentBytes != prevBytes {
+            if let prevBytes = previous.topFolders[folderPath], currentBytes != prevBytes {
                 deltas.append(
                     StorageGrowthDelta(
                         name: folderPath,

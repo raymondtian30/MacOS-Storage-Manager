@@ -23,7 +23,7 @@ public enum AppAppearanceMode: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 @Observable
 public final class AppState {
-    public nonisolated static let currentVersion = "1.2.0"
+    public nonisolated static let currentVersion = "1.2.1"
 
     // Navigation
     public var selectedSection: NavigationSection = .overview
@@ -100,7 +100,12 @@ public final class AppState {
         didSet { UserDefaults.standard.set(scanExclusions, forKey: "spacesense.scanExclusions") }
     }
     public var historyRetentionDays: Int {
-        didSet { UserDefaults.standard.set(historyRetentionDays, forKey: "spacesense.historyRetentionDays") }
+        didSet {
+            UserDefaults.standard.set(historyRetentionDays, forKey: "spacesense.historyRetentionDays")
+            historyStore.pruneOldSnapshots(retentionDays: historyRetentionDays)
+            historySnapshots = historyStore.fetchSnapshots()
+            growthDeltas = historyStore.computeGrowthDeltas(snapshots: historySnapshots)
+        }
     }
     public var appearanceMode: AppAppearanceMode {
         didSet { UserDefaults.standard.set(appearanceMode.rawValue, forKey: "spacesense.appearanceMode") }
@@ -126,7 +131,11 @@ public final class AppState {
     private var activeScanTask: Task<Void, Never>?
     private var activeDuplicateTask: Task<Void, Never>?
     private var activeCleanupTask: Task<Void, Never>?
+    private var activeAITask: Task<Void, Never>?
+    private var activeModelDetectTask: Task<Void, Never>?
     private var currentScanID: UUID = UUID()
+    private var currentDuplicateID: UUID = UUID()
+    private var currentCleanupID: UUID = UUID()
 
     public nonisolated static let largeFileThresholdOptionsMB: [(label: String, value: Double)] = [
         ("250 MB", 250.0),
@@ -147,7 +156,8 @@ public final class AppState {
         self.historyStore = historyStore
 
         let defaults = UserDefaults.standard
-        self.geminiModel = defaults.string(forKey: "spacesense.geminiModel") ?? "gemini-2.5-flash"
+        let savedModel = defaults.string(forKey: "spacesense.geminiModel") ?? "gemini-2.5-flash"
+        self.geminiModel = savedModel
 
         let savedThreshold = defaults.double(forKey: "spacesense.largeFileThresholdMB")
         let validThresholds: Set<Double> = [250.0, 500.0, 750.0, 1024.0]
@@ -163,6 +173,7 @@ public final class AppState {
             "/System/Volumes/Preboot",
             "/System/Volumes/VM",
             "/System/Volumes/Update",
+            "/private/var/vm",
             "/Volumes"
         ]
         let savedRetention = defaults.integer(forKey: "spacesense.historyRetentionDays")
@@ -178,6 +189,9 @@ public final class AppState {
             let provider = AIProvider.detect(from: savedKey)
             self.detectedAIProvider = provider
             self.detectedAIModels = provider.defaultModels
+            if !provider.defaultModels.contains(self.geminiModel) {
+                self.geminiModel = provider.defaultModels[0]
+            }
             Task {
                 await detectModelsForSavedKey(savedKey)
             }
@@ -197,8 +211,6 @@ public final class AppState {
         volumeStats = VolumeStats.currentBootVolume()
     }
 
-    /// Checks if a scan is already running before starting a new scan.
-    /// If a scan is running, presents "Scan in progress, would you like to stop the scan?"
     public func requestStartScan(at url: URL? = nil) {
         if isScanning {
             showingStopScanPrompt = true
@@ -307,6 +319,9 @@ public final class AppState {
     public func runDuplicateScan() async {
         guard let scanResult = latestScanResult else { return }
         activeDuplicateTask?.cancel()
+
+        let dupID = UUID()
+        currentDuplicateID = dupID
         isFindingDuplicates = true
         duplicateProgress = (0, 1)
 
@@ -320,14 +335,16 @@ public final class AppState {
                     minimumBytes: minBytes
                 ) { [weak self] processed, total in
                     Task { @MainActor [weak self] in
-                        self?.duplicateProgress = (processed, total)
+                        guard let self, self.currentDuplicateID == dupID else { return }
+                        self.duplicateProgress = (processed, total)
                     }
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self.currentDuplicateID == dupID else { return }
                 self.duplicateGroups = groups
                 self.isFindingDuplicates = false
                 await self.refreshCleanupRecommendationsAsync()
             } catch {
+                guard self.currentDuplicateID == dupID else { return }
                 self.isFindingDuplicates = false
             }
         }
@@ -378,9 +395,10 @@ public final class AppState {
         }
     }
 
-    /// Runs recommendation analysis on a background thread so the UI never freezes or shows a beachball.
     public func refreshCleanupRecommendationsAsync() async {
         activeCleanupTask?.cancel()
+        let cleanupID = UUID()
+        currentCleanupID = cleanupID
         isRefreshingCleanup = true
 
         let scanSnapshot = latestScanResult
@@ -390,23 +408,23 @@ public final class AppState {
         let thresholdBytes = Int64(largeFileThresholdMB * 1024 * 1024)
         let engine = cleanupEngine
 
-        let task = Task.detached(priority: .userInitiated) { () -> [CleanupCandidate] in
-            engine.buildRecommendations(
-                scanResult: scanSnapshot,
-                systemDataReport: sysSnapshot,
-                duplicateGroups: dupSnapshot,
-                unusedDaysThreshold: unusedDays,
-                largeFileThresholdBytes: thresholdBytes
-            )
-        }
+        let wrapperTask = Task { @MainActor in
+            let built = await Task.detached(priority: .userInitiated) { () -> [CleanupCandidate] in
+                engine.buildRecommendations(
+                    scanResult: scanSnapshot,
+                    systemDataReport: sysSnapshot,
+                    duplicateGroups: dupSnapshot,
+                    unusedDaysThreshold: unusedDays,
+                    largeFileThresholdBytes: thresholdBytes
+                )
+            }.value
 
-        let built = await task.value
-        guard !Task.isCancelled else {
-            isRefreshingCleanup = false
-            return
+            guard !Task.isCancelled, self.currentCleanupID == cleanupID else { return }
+            self.cleanupCandidates = built
+            self.isRefreshingCleanup = false
         }
-        self.cleanupCandidates = built
-        self.isRefreshingCleanup = false
+        activeCleanupTask = wrapperTask
+        await wrapperTask.value
     }
 
     public var totalReclaimableBytes: Int64 {
@@ -418,41 +436,89 @@ public final class AppState {
         lastCleanupResult = result
         refreshVolumeStats()
 
-        let failedPaths = Set(result.failures.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
+        let failedPaths = Set(result.failures.map { StorageScanner.fastCleanPath(URL(fileURLWithPath: $0.path).standardizedFileURL.path) })
         let trashedSet = Set(
-            urls.map { $0.standardizedFileURL.path }
+            urls.map { StorageScanner.fastCleanPath($0.standardizedFileURL.path) }
                 .filter { !failedPaths.contains($0) }
         )
 
-        cleanupCandidates.removeAll { trashedSet.contains($0.locationURL.standardizedFileURL.path) }
+        cleanupCandidates.removeAll { Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.locationURL.standardizedFileURL.path), in: trashedSet) }
 
         for idx in duplicateGroups.indices {
-            duplicateGroups[idx].files.removeAll { trashedSet.contains($0.url.standardizedFileURL.path) }
+            duplicateGroups[idx].files.removeAll { Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.url.standardizedFileURL.path), in: trashedSet) }
         }
         duplicateGroups.removeAll { $0.files.count < 2 }
 
+        if let sysReport = systemDataReport, !trashedSet.isEmpty {
+            var updatedSysItems: [SystemDataItem] = []
+            var removedSysBytes: Int64 = 0
+            for item in sysReport.items {
+                let cleanedItemPath = StorageScanner.fastCleanPath(URL(fileURLWithPath: item.locationPath).standardizedFileURL.path)
+                if Self.isPathOrDescendant(cleanedItemPath, in: trashedSet) {
+                    removedSysBytes += item.sizeBytes ?? 0
+                    updatedSysItems.append(
+                        SystemDataItem(
+                            category: item.category,
+                            locationPath: item.locationPath,
+                            url: item.url,
+                            sizeBytes: 0,
+                            measurability: item.measurability,
+                            explanation: item.explanation,
+                            recommendation: item.recommendation,
+                            potentialRisks: item.potentialRisks,
+                            isUserCleanable: false
+                        )
+                    )
+                } else {
+                    updatedSysItems.append(item)
+                }
+            }
+            systemDataReport = SystemDataReport(
+                timestamp: sysReport.timestamp,
+                items: updatedSysItems,
+                totalMeasuredBytes: max(0, sysReport.totalMeasuredBytes - removedSysBytes),
+                estimatedUnindexedSystemBytes: sysReport.estimatedUnindexedSystemBytes,
+                inaccessiblePathCount: sysReport.inaccessiblePathCount
+            )
+        }
+
         if let currentScan = latestScanResult, !trashedSet.isEmpty {
-            let updatedLarge = currentScan.largeFiles.filter { !trashedSet.contains($0.url.standardizedFileURL.path) }
-            let updatedAll = currentScan.allFiles.filter { !trashedSet.contains($0.url.standardizedFileURL.path) }
+            let trashedFiles = currentScan.allFiles.filter { Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.url.standardizedFileURL.path), in: trashedSet) }
+            var updatedCategories = currentScan.categoryBytes
+            for file in trashedFiles {
+                updatedCategories[file.category] = max(0, (updatedCategories[file.category] ?? 0) - file.size)
+            }
+
+            let updatedLarge = currentScan.largeFiles.filter { !Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.url.standardizedFileURL.path), in: trashedSet) }
+            let updatedAll = currentScan.allFiles.filter { !Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.url.standardizedFileURL.path), in: trashedSet) }
+            let updatedRoot = Self.pruneTree(node: currentScan.rootNode, trashedPaths: trashedSet).node
+
             latestScanResult = ScanResult(
                 id: currentScan.id,
                 timestamp: currentScan.timestamp,
                 rootURL: currentScan.rootURL,
                 durationSeconds: currentScan.durationSeconds,
-                rootNode: currentScan.rootNode,
-                categoryBytes: currentScan.categoryBytes,
+                rootNode: updatedRoot,
+                categoryBytes: updatedCategories,
                 largeFiles: updatedLarge,
                 allFiles: updatedAll,
-                totalFilesScanned: currentScan.totalFilesScanned,
+                totalFilesScanned: max(0, currentScan.totalFilesScanned - trashedFiles.count),
                 totalDirectoriesScanned: currentScan.totalDirectoriesScanned,
                 permissionErrorCount: currentScan.permissionErrorCount,
                 volumeStats: volumeStats
             )
-            if var node = analyzerCurrentNode {
-                node.children.removeAll { trashedSet.contains($0.url.standardizedFileURL.path) }
-                analyzerCurrentNode = node
+
+            // Re-sync breadcrumbs and current analyzer node from the updated tree
+            analyzerBreadcrumbs = analyzerBreadcrumbs.compactMap { crumb in
+                Self.findNode(id: crumb.id, in: updatedRoot)
             }
+            if analyzerBreadcrumbs.isEmpty {
+                analyzerBreadcrumbs = [updatedRoot]
+            }
+            analyzerCurrentNode = analyzerBreadcrumbs.last
         }
+
+        await refreshCleanupRecommendationsAsync()
 
         if result.movedToTrashCount > 0 {
             statusBannerMessage = "Moved \(result.movedToTrashCount) item(s) (\(ByteFormatting.string(result.reclaimedBytes))) to Trash."
@@ -461,6 +527,56 @@ public final class AppState {
             activeErrorMessage = "Could not move '\(firstFailure.path)' to Trash: \(firstFailure.reason)"
         }
         return result
+    }
+
+    private static func isPathOrDescendant(_ path: String, in trashedPaths: Set<String>) -> Bool {
+        if trashedPaths.contains(path) { return true }
+        return trashedPaths.contains { path.hasPrefix($0 + "/") }
+    }
+
+    private static func pruneTree(node: FileNode, trashedPaths: Set<String>) -> (node: FileNode, removedBytes: Int64, removedCount: Int) {
+        var totalRemovedBytes: Int64 = 0
+        var totalRemovedCount = 0
+        var keptChildren: [FileNode] = []
+
+        for child in node.children {
+            let childPath = StorageScanner.fastCleanPath(child.url.standardizedFileURL.path)
+            if isPathOrDescendant(childPath, in: trashedPaths) {
+                totalRemovedBytes += child.size
+                totalRemovedCount += max(1, child.itemCount)
+            } else if child.isDirectory {
+                let prunedChild = pruneTree(node: child, trashedPaths: trashedPaths)
+                totalRemovedBytes += prunedChild.removedBytes
+                totalRemovedCount += prunedChild.removedCount
+                keptChildren.append(prunedChild.node)
+            } else {
+                keptChildren.append(child)
+            }
+        }
+
+        let updatedNode = FileNode(
+            url: node.url,
+            name: node.name,
+            isDirectory: node.isDirectory,
+            size: max(0, node.size - totalRemovedBytes),
+            modificationDate: node.modificationDate,
+            fileExtension: node.fileExtension,
+            category: node.category,
+            itemCount: max(0, node.itemCount - totalRemovedCount),
+            isAccessible: node.isAccessible,
+            children: keptChildren
+        )
+        return (updatedNode, totalRemovedBytes, totalRemovedCount)
+    }
+
+    private static func findNode(id: String, in root: FileNode) -> FileNode? {
+        if root.id == id { return root }
+        for child in root.children where child.isDirectory {
+            if let found = findNode(id: id, in: child) {
+                return found
+            }
+        }
+        return nil
     }
 
     // MARK: - Finder & Quick Actions
@@ -473,12 +589,29 @@ public final class AppState {
         NSWorkspace.shared.open(url)
     }
 
+    public func copyPathToClipboard(_ path: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+        statusBannerMessage = "Copied path to clipboard."
+    }
+
     // MARK: - Universal AI Key & Auto Model Detection
 
     public func saveAPIKey(_ key: String) {
-        _ = keychainService.saveAPIKey(key)
+        activeModelDetectTask?.cancel()
+        let saved = keychainService.saveAPIKey(key)
         hasConfiguredAPIKey = (keychainService.loadAPIKey() != nil)
-        Task {
+        if !saved {
+            activeErrorMessage = "Could not save API key to macOS Keychain."
+            return
+        }
+        let provider = AIProvider.detect(from: key)
+        detectedAIProvider = provider
+        detectedAIModels = provider.defaultModels
+        if !provider.defaultModels.contains(geminiModel) {
+            geminiModel = provider.defaultModels[0]
+        }
+        activeModelDetectTask = Task {
             await detectModelsForSavedKey(key)
         }
     }
@@ -486,6 +619,10 @@ public final class AppState {
     public func detectModelsForSavedKey(_ key: String) async {
         isDetectingModels = true
         let detected = await geminiService.autoDetectProviderAndModels(for: key)
+        guard !Task.isCancelled else {
+            isDetectingModels = false
+            return
+        }
         detectedAIProvider = detected.provider
         detectedAIModels = detected.models
         if !detected.models.contains(geminiModel) {
@@ -495,10 +632,13 @@ public final class AppState {
     }
 
     public func removeAPIKey() {
+        activeModelDetectTask?.cancel()
+        isDetectingModels = false
         _ = keychainService.deleteAPIKey()
         hasConfiguredAPIKey = false
         detectedAIProvider = .gemini
         detectedAIModels = AIProvider.gemini.defaultModels
+        geminiModel = AIProvider.gemini.defaultModels[0]
     }
 
     public func currentAIContextSummary() -> String {
@@ -514,6 +654,9 @@ public final class AppState {
     }
 
     public func clearAIChat() {
+        activeAITask?.cancel()
+        activeAITask = nil
+        isAIThinking = false
         aiMessages = [
             AIMessage(
                 role: .assistant,
@@ -543,26 +686,35 @@ public final class AppState {
         }
 
         let context = currentAIContextSummary()
-        do {
-            let reply = try await geminiService.askQuestion(
-                question: trimmed,
-                contextSummary: context,
-                conversationHistory: historySnapshot,
-                apiKey: apiKey,
-                model: geminiModel,
-                provider: detectedAIProvider
-            )
-            aiMessages.append(AIMessage(role: .assistant, content: reply))
-        } catch {
-            aiMessages.append(
-                AIMessage(
-                    role: .assistant,
-                    content: error.localizedDescription,
-                    isError: true
+        let model = geminiModel
+        let provider = detectedAIProvider
+
+        let task = Task { @MainActor in
+            do {
+                let reply = try await geminiService.askQuestion(
+                    question: trimmed,
+                    contextSummary: context,
+                    conversationHistory: historySnapshot,
+                    apiKey: apiKey,
+                    model: model,
+                    provider: provider
                 )
-            )
+                guard !Task.isCancelled else { return }
+                aiMessages.append(AIMessage(role: .assistant, content: reply))
+            } catch {
+                guard !Task.isCancelled else { return }
+                aiMessages.append(
+                    AIMessage(
+                        role: .assistant,
+                        content: error.localizedDescription,
+                        isError: true
+                    )
+                )
+            }
+            isAIThinking = false
         }
-        isAIThinking = false
+        activeAITask = task
+        await task.value
     }
 
     // MARK: - Check for Updates
@@ -591,12 +743,13 @@ public final class AppState {
                 return
             }
 
-            let normalizedRemote = tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
             let htmlURLString = json["html_url"] as? String ?? "https://github.com/raymondtian30/MacOS-Storage-Manager/releases"
 
-            if normalizedRemote.compare(Self.currentVersion, options: .numeric) == .orderedDescending {
+            if Self.isRemoteVersionNewer(remoteTag: tagName, currentVersion: Self.currentVersion) {
                 updateStatusMessage = "Update available: \(tagName) (current: v\(Self.currentVersion))"
-                availableUpdateURL = URL(string: htmlURLString)
+                if let parsedURL = URL(string: htmlURLString), parsedURL.scheme == "https" {
+                    availableUpdateURL = parsedURL
+                }
             } else {
                 updateStatusMessage = "SpaceSense v\(Self.currentVersion) is up to date."
             }
@@ -605,6 +758,22 @@ public final class AppState {
         }
 
         isCheckingForUpdates = false
+    }
+
+    private static func isRemoteVersionNewer(remoteTag: String, currentVersion: String) -> Bool {
+        let cleanRemote = remoteTag.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+            .split(separator: "-").first.map(String.init) ?? ""
+        let cleanCurrent = currentVersion.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+            .split(separator: "-").first.map(String.init) ?? ""
+        let rParts = cleanRemote.split(separator: ".").compactMap { Int($0) }
+        let cParts = cleanCurrent.split(separator: ".").compactMap { Int($0) }
+        let count = max(rParts.count, cParts.count)
+        for i in 0..<count {
+            let r = i < rParts.count ? rParts[i] : 0
+            let c = i < cParts.count ? cParts[i] : 0
+            if r != c { return r > c }
+        }
+        return false
     }
 
     private func postScanCompletedNotification(result: ScanResult) {

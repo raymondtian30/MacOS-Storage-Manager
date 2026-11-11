@@ -21,9 +21,9 @@ public final class SpaceSenseAppDelegate: NSObject, NSApplicationDelegate {
         let path = NSBezierPath(roundedRect: rect, xRadius: size * 0.19, yRadius: size * 0.19)
 
         let bgGradient = NSGradient(colors: [
-            NSColor(calibratedRed: 0.10, green: 0.15, blue: 0.28, alpha: 1.0),
-            NSColor(calibratedRed: 0.18, green: 0.42, blue: 0.78, alpha: 1.0),
-            NSColor(calibratedRed: 0.24, green: 0.72, blue: 0.64, alpha: 1.0)
+            NSColor(calibratedRed: 0.14, green: 0.18, blue: 0.24, alpha: 1.0),
+            NSColor(calibratedRed: 0.22, green: 0.68, blue: 0.96, alpha: 1.0),
+            NSColor(calibratedRed: 0.20, green: 0.82, blue: 0.64, alpha: 1.0)
         ])
         bgGradient?.draw(in: path, angle: -45)
 
@@ -94,7 +94,7 @@ struct SpaceSenseApp: App {
     var body: some Scene {
         WindowGroup("SpaceSense") {
             MainWindowView(appState: appState)
-                .frame(minWidth: 1040, minHeight: 680)
+                .frame(minWidth: 680, idealWidth: 1080, maxWidth: .infinity, minHeight: 480, idealHeight: 720, maxHeight: .infinity)
         }
         .windowStyle(.titleBar)
         .commands {

@@ -8,51 +8,73 @@ public struct SystemDataView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    SectionHeaderBar(
-                        title: "System Data Analyzer",
-                        subtitle: "Breakdown of measured caches, developer artifacts, estimated snapshots, and protected system folders",
-                        icon: NavigationSection.systemData.icon
-                    )
+        GeometryReader { geo in
+            let isCompact = geo.size.width < 720
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    headerRow
 
-                    Button {
-                        Task { await appState.refreshSystemData() }
-                    } label: {
-                        Label(
-                            appState.isAnalyzingSystemData ? "Inspecting…" : "Refresh System Data",
-                            systemImage: "arrow.clockwise"
-                        )
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(SpaceSenseTheme.accent)
-                    .disabled(appState.isAnalyzingSystemData)
-                }
-
-                if let report = appState.systemDataReport {
-                    summaryCards(report: report)
-                    itemsListCard(report: report)
-                } else {
-                    SurfaceCard {
-                        HStack(spacing: 12) {
-                            ProgressView()
-                            Text("Measuring accessible ~/Library and system storage locations…")
-                                .font(.subheadline)
+                    if let report = appState.systemDataReport {
+                        summaryCards(report: report)
+                        itemsListCard(report: report)
+                    } else {
+                        SurfaceCard {
+                            HStack(spacing: 12) {
+                                ProgressView()
+                                Text("Measuring accessible ~/Library and system storage locations…")
+                                    .font(.subheadline)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(30)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(30)
                     }
                 }
+                .padding(isCompact ? 14 : 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(24)
         }
+    }
+
+    private var headerRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                SectionHeaderBar(
+                    title: "System Data Analyzer",
+                    subtitle: "Breakdown of measured caches, developer artifacts, estimated snapshots, and protected system folders",
+                    icon: NavigationSection.systemData.icon
+                )
+                refreshButton
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeaderBar(
+                    title: "System Data Analyzer",
+                    subtitle: "Breakdown of measured caches, developer artifacts, estimated snapshots, and protected system folders",
+                    icon: NavigationSection.systemData.icon
+                )
+                refreshButton
+            }
+        }
+    }
+
+    private var refreshButton: some View {
+        Button {
+            Task { await appState.refreshSystemData() }
+        } label: {
+            Label(
+                appState.isAnalyzingSystemData ? "Inspecting…" : "Refresh System Data",
+                systemImage: "arrow.clockwise"
+            )
+            .lineLimit(1)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(SpaceSenseTheme.accent)
+        .disabled(appState.isAnalyzingSystemData)
     }
 
     private func summaryCards(report: SystemDataReport) -> some View {
         LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 4),
-            spacing: 14
+            columns: [GridItem(.adaptive(minimum: 155, maximum: 320), spacing: 12)],
+            spacing: 12
         ) {
             MetricCardView(
                 title: "Measured System Paths",
@@ -61,13 +83,19 @@ public struct SystemDataView: View {
                 icon: "checkmark.circle.fill",
                 tint: SpaceSenseTheme.secondaryAccent
             )
-            MetricCardView(
-                title: "Safely Cleanable",
-                value: ByteFormatting.string(report.cleanableBytes),
-                subtitle: "Caches, logs & DerivedData",
-                icon: "trash.slash.fill",
-                tint: SpaceSenseTheme.secondaryAccent
-            )
+            Button {
+                appState.selectedSection = .deleteHub
+            } label: {
+                MetricCardView(
+                    title: "Safely Cleanable",
+                    value: ByteFormatting.string(report.cleanableBytes),
+                    subtitle: "Caches, logs & DerivedData",
+                    icon: "trash.slash.fill",
+                    tint: SpaceSenseTheme.secondaryAccent
+                )
+            }
+            .buttonStyle(.plain)
+
             MetricCardView(
                 title: "Estimated Unindexed / VM",
                 value: ByteFormatting.string(report.estimatedUnindexedSystemBytes),
@@ -89,7 +117,7 @@ public struct SystemDataView: View {
 
     private func itemsListCard(report: SystemDataReport) -> some View {
         SurfaceCard {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("Inspected System & Library Locations")
                         .font(.headline)
@@ -98,11 +126,13 @@ public struct SystemDataView: View {
                 }
 
                 ForEach(report.items) { item in
-                    HStack(alignment: .top, spacing: 12) {
+                    HStack(alignment: .top, spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
+                            HStack(spacing: 6) {
                                 Text(item.category)
                                     .font(.subheadline.weight(.bold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
 
                                 Text(item.measurability.rawValue)
                                     .font(.caption2.weight(.semibold))
@@ -110,6 +140,7 @@ public struct SystemDataView: View {
                                     .padding(.vertical, 2)
                                     .background(item.measurability.badgeColor.opacity(0.16), in: Capsule())
                                     .foregroundStyle(item.measurability.badgeColor)
+                                    .lineLimit(1)
 
                                 Text(item.recommendation.rawValue)
                                     .font(.caption2.weight(.semibold))
@@ -117,6 +148,7 @@ public struct SystemDataView: View {
                                     .padding(.vertical, 2)
                                     .background(item.recommendation.color.opacity(0.16), in: Capsule())
                                     .foregroundStyle(item.recommendation.color)
+                                    .lineLimit(1)
 
                                 if item.recommendation != .recommended {
                                     InfoTooltipIcon("\(item.explanation) Risk: \(item.potentialRisks)")
@@ -126,35 +158,56 @@ public struct SystemDataView: View {
                             Text(item.locationPath)
                                 .font(.caption2.monospaced())
                                 .foregroundStyle(SpaceSenseTheme.slate)
-                                .textSelection(.enabled)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(item.locationPath)
 
                             Text(item.explanation)
                                 .font(.caption)
                                 .foregroundStyle(SpaceSenseTheme.slate)
                         }
 
-                        Spacer()
+                        Spacer(minLength: 6)
 
-                        Text(item.sizeBytes.map { ByteFormatting.string($0) } ?? "Restricted")
-                            .font(.subheadline.monospacedDigit().weight(.bold))
-                            .foregroundStyle(item.sizeBytes == nil ? SpaceSenseTheme.slate : .primary)
+                        VStack(alignment: .trailing, spacing: 6) {
+                            Text(item.sizeBytes.map { ByteFormatting.string($0) } ?? "Restricted")
+                                .font(.subheadline.monospacedDigit().weight(.bold))
+                                .foregroundStyle(item.sizeBytes == nil ? SpaceSenseTheme.slate : .primary)
+                                .lineLimit(1)
 
-                        if let url = item.url {
-                            Button {
-                                appState.revealInFinder(url)
-                            } label: {
-                                Label("Finder", systemImage: "folder")
-                                    .font(.caption)
+                            HStack(spacing: 6) {
+                                if item.isUserCleanable && item.recommendation == .recommended {
+                                    Button("Delete Hub") {
+                                        appState.selectedSection = .deleteHub
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+
+                                if let url = item.url {
+                                    Button {
+                                        appState.revealInFinder(url)
+                                    } label: {
+                                        Image(systemName: "folder")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .help("Reveal in Finder")
+                                }
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                     }
-                    .padding(12)
+                    .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(SpaceSenseTheme.slate.opacity(0.06))
                     )
+                    .contextMenu {
+                        if let url = item.url {
+                            Button("Reveal in Finder") { appState.revealInFinder(url) }
+                            Button("Copy Path") { appState.copyPathToClipboard(item.locationPath) }
+                        }
+                    }
                 }
             }
         }

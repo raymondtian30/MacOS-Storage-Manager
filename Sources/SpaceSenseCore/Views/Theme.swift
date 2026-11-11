@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// Sleek 3-color palette:
-/// 1. Electric Cyan (`accent`)
-/// 2. Emerald Mint (`secondaryAccent`)
-/// 3. Cool Slate (`slate`)
+/// 1. Electric Cyan (`accent`) — primary actions, active navigation, primary data
+/// 2. Emerald Mint (`secondaryAccent`) — available/reclaimable space, safe badges, preserved copies
+/// 3. Cool Slate (`slate`) — neutral surfaces, borders, secondary labels, muted states
 public enum SpaceSenseTheme {
     public static let accent = Color(red: 0.22, green: 0.68, blue: 0.96)
     public static let secondaryAccent = Color(red: 0.20, green: 0.82, blue: 0.64)
@@ -15,7 +15,8 @@ public enum SpaceSenseTheme {
 /// Hoverable question-mark icon used strictly next to technical or non-obvious storage concepts.
 public struct InfoTooltipIcon: View {
     public let explanation: String
-    @State private var isHovering: Bool = false
+    @State private var isShowingPopover: Bool = false
+    @State private var dismissWorkItem: DispatchWorkItem?
 
     public init(_ explanation: String) {
         self.explanation = explanation
@@ -24,19 +25,32 @@ public struct InfoTooltipIcon: View {
     public var body: some View {
         Image(systemName: "questionmark.circle")
             .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(isHovering ? SpaceSenseTheme.accent : SpaceSenseTheme.slate)
+            .foregroundStyle(isShowingPopover ? SpaceSenseTheme.accent : SpaceSenseTheme.slate)
+            .padding(2)
+            .contentShape(Rectangle())
             .onHover { hovering in
-                isHovering = hovering
+                dismissWorkItem?.cancel()
+                if hovering {
+                    isShowingPopover = true
+                } else {
+                    let work = DispatchWorkItem {
+                        isShowingPopover = false
+                    }
+                    dismissWorkItem = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+                }
             }
-            .popover(isPresented: $isHovering, arrowEdge: .top) {
+            .onTapGesture {
+                isShowingPopover.toggle()
+            }
+            .popover(isPresented: $isShowingPopover, arrowEdge: .bottom) {
                 Text(explanation)
                     .font(.caption)
                     .foregroundStyle(.primary)
                     .padding(10)
-                    .frame(width: 260, alignment: .leading)
+                    .frame(width: 250, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .help(explanation)
     }
 }
 
@@ -44,7 +58,7 @@ public struct SurfaceCard<Content: View>: View {
     private let padding: CGFloat
     private let content: Content
 
-    public init(padding: CGFloat = 16, @ViewBuilder content: () -> Content) {
+    public init(padding: CGFloat = 14, @ViewBuilder content: () -> Content) {
         self.padding = padding
         self.content = content()
     }
@@ -52,10 +66,12 @@ public struct SurfaceCard<Content: View>: View {
     public var body: some View {
         content
             .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(Color(nsColor: .controlBackgroundColor).opacity(0.9))
             )
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(SpaceSenseTheme.slate.opacity(0.18), lineWidth: 1)
@@ -88,30 +104,33 @@ public struct MetricCardView: View {
     }
 
     public var body: some View {
-        SurfaceCard {
-            VStack(alignment: .leading, spacing: 8) {
+        SurfaceCard(padding: 12) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Image(systemName: icon)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(tint)
-                        .frame(width: 28, height: 28)
-                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    Spacer()
+                        .frame(width: 26, height: 26)
+                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    Spacer(minLength: 4)
                     if let tooltip {
                         InfoTooltipIcon(tooltip)
                     }
                 }
                 Text(value)
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.75)
+                    .minimumScaleFactor(0.6)
                 Text(title)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(SpaceSenseTheme.slate)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -130,23 +149,27 @@ public struct SectionHeaderBar: View {
     }
 
     public var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Image(systemName: icon)
-                .font(.system(size: 18, weight: .semibold))
+                .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(SpaceSenseTheme.accent)
-                .frame(width: 38, height: 38)
+                .frame(width: 34, height: 34)
                 .background(
                     SpaceSenseTheme.accent.opacity(0.14),
-                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: 9, style: .continuous)
                 )
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.title2.weight(.bold))
+                    .font(.title3.weight(.bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 Text(subtitle)
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundStyle(SpaceSenseTheme.slate)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
-            Spacer()
+            Spacer(minLength: 4)
         }
     }
 }
@@ -161,20 +184,23 @@ public struct ScanProgressBanner: View {
     }
 
     public var body: some View {
-        SurfaceCard(padding: 14) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
+        SurfaceCard(padding: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
                     Text("Scanning Filesystem…")
                         .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
                     Text("\(Int(progress.percent))%")
                         .font(.subheadline.monospacedDigit().weight(.bold))
                         .foregroundStyle(SpaceSenseTheme.accent)
                     Text("• \(progress.filesScanned.formatted()) files (\(ByteFormatting.string(progress.bytesScanned)))")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(SpaceSenseTheme.slate)
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 4)
                     Button(role: .cancel, action: onCancel) {
                         Label("Stop Scan", systemImage: "xmark.circle.fill")
                     }
@@ -191,6 +217,7 @@ public struct ScanProgressBanner: View {
                     .foregroundStyle(SpaceSenseTheme.slate)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(progress.currentPath)
             }
         }
     }

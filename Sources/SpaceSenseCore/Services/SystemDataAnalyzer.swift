@@ -17,7 +17,7 @@ public actor SystemDataAnalyzer {
         volumeStats: VolumeStats,
         knownScanBytes: Int64? = nil,
         customHomeURL: URL? = nil,
-        maxFilesPerLocation: Int = 12_000
+        maxFilesPerLocation: Int = 35_000
     ) async -> SystemDataReport {
         let home = (customHomeURL ?? FileManager.default.homeDirectoryForCurrentUser).path
         let specs: [ProbeSpec] = [
@@ -81,7 +81,7 @@ public actor SystemDataAnalyzer {
                 isHomeRelative: true,
                 explanation: "Databases, plugins, offline assets, and configuration data used by installed applications.",
                 recommendation: .reviewCarefully,
-                potentialRisks: "Contains active app settings, local databases, and game/project assets. Only remove folders for uninstalled apps.",
+                potentialRisks: "Contains active app settings, local databases, and project assets. Only remove folders for uninstalled apps.",
                 isUserCleanable: false
             ),
             ProbeSpec(
@@ -181,7 +181,6 @@ public actor SystemDataAnalyzer {
                 continue
             }
 
-            // For /System/Library, measure top-level metadata or mark as SIP system component without walking 400k files
             if fullPath == "/System/Library" {
                 items.append(
                     SystemDataItem(
@@ -199,9 +198,16 @@ public actor SystemDataAnalyzer {
                 continue
             }
 
-            let excludedSubpath = spec.relativeOrAbsolutePath == "Library/Caches"
-                ? URL(fileURLWithPath: home).appendingPathComponent("Library/Caches/Homebrew").standardizedFileURL.path
-                : nil
+            // Avoid double-counting child probes inside parent probes
+            let excludedSubpath: String?
+            if spec.relativeOrAbsolutePath == "Library/Caches" {
+                excludedSubpath = URL(fileURLWithPath: home).appendingPathComponent("Library/Caches/Homebrew").standardizedFileURL.path
+            } else if spec.relativeOrAbsolutePath == "Library/Application Support" {
+                excludedSubpath = URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/MobileSync/Backup").standardizedFileURL.path
+            } else {
+                excludedSubpath = nil
+            }
+
             let (size, hadPermissionIssue, wasTruncated) = measureDirectoryBytes(
                 at: url,
                 maxFiles: maxFilesPerLocation,
@@ -227,18 +233,17 @@ public actor SystemDataAnalyzer {
             )
         }
 
-        // Calculate estimated unindexed System Data (APFS local snapshots, Spotlight index, VM swap, protected /private/var folders)
-        let accountedBytes = max(totalMeasured, knownScanBytes ?? 0)
-        let unindexedEstimate = max(0, volumeStats.usedBytes - accountedBytes)
+        let accountedBytes = max(totalMeasured, (knownScanBytes ?? 0) + totalMeasured / 2)
+        let unindexedEstimate = max(0, volumeStats.usedBytes - min(volumeStats.usedBytes, accountedBytes))
 
         items.append(
             SystemDataItem(
-                category: "APFS Snapshots, VM Swap & Unindexed System Data",
+                category: "APFS Snapshots, VM Swap & Unscanned System/Volume Space",
                 locationPath: "/System/Volumes/VM & APFS Local Snapshots",
                 url: nil,
                 sizeBytes: unindexedEstimate,
                 measurability: .estimated,
-                explanation: "Estimated space used by Time Machine local snapshots, virtual memory swapfiles, Spotlight indexes, and root-only system directories outside the scanned folders.",
+                explanation: "Estimated space used by Time Machine local snapshots, virtual memory swapfiles, Spotlight indexes, and volume directories outside the current user scan.",
                 recommendation: .doNotModify,
                 potentialRisks: "Managed automatically by macOS and APFS; macOS purges local snapshots automatically when disk space is needed.",
                 isUserCleanable: false
@@ -259,15 +264,17 @@ public actor SystemDataAnalyzer {
     private func measureDirectoryBytes(
         at directoryURL: URL,
         maxFiles: Int,
-        maxSeconds: TimeInterval = 0.6,
+        maxSeconds: TimeInterval = 1.0,
         excludingSubpath: String? = nil
     ) -> (Int64, Bool, Bool) {
         let keys: [URLResourceKey] = [
             .isSymbolicLinkKey,
             .totalFileAllocatedSizeKey,
             .fileAllocatedSizeKey,
-            .fileSizeKey
+            .fileSizeKey,
+            .fileResourceIdentifierKey
         ]
+        let keySet = Set(keys)
         var permissionErrorOccurred = false
         guard let enumerator = FileManager.default.enumerator(
             at: directoryURL,
@@ -282,10 +289,15 @@ public actor SystemDataAnalyzer {
         }
 
         let deadline = Date().addingTimeInterval(maxSeconds)
+        var seenInodes: Set<AnyHashable> = []
         var total: Int64 = 0
         var count = 0
         var truncated = false
         while let fileURL = enumerator.nextObject() as? URL {
+            if count % 400 == 0 && Task.isCancelled {
+                truncated = true
+                break
+            }
             if let excludingSubpath {
                 let p = fileURL.standardizedFileURL.path
                 if p == excludingSubpath || p.hasPrefix(excludingSubpath + "/") {
@@ -294,13 +306,18 @@ public actor SystemDataAnalyzer {
                 }
             }
             count += 1
-            if count > maxFiles || (count % 256 == 0 && Date() >= deadline) {
+            if count > maxFiles || (count % 512 == 0 && Date() >= deadline) {
                 truncated = true
                 break
             }
-            guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
+            guard let values = try? fileURL.resourceValues(forKeys: keySet),
                   values.isSymbolicLink != true else {
                 continue
+            }
+            if let rawObj = values.fileResourceIdentifier as? NSObject {
+                if !seenInodes.insert(AnyHashable(rawObj)).inserted {
+                    continue
+                }
             }
             let size = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
             total += Int64(size)

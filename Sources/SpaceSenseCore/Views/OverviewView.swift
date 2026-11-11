@@ -8,46 +8,72 @@ public struct OverviewView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                headerRow
-                topMetricsGrid
-                storageBarSection
+        GeometryReader { geo in
+            let isCompact = geo.size.width < 720
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    headerRow
+                    topMetricsGrid
+                    storageBarSection
 
-                HStack(alignment: .top, spacing: 16) {
-                    recentLargeFilesCard
-                    rightColumnCards
+                    if isCompact {
+                        VStack(alignment: .leading, spacing: 16) {
+                            recentLargeFilesCard
+                            rightColumnCards
+                        }
+                    } else {
+                        HStack(alignment: .top, spacing: 16) {
+                            recentLargeFilesCard
+                                .frame(maxWidth: .infinity)
+                            rightColumnCards
+                                .frame(minWidth: 230, idealWidth: 290, maxWidth: 340)
+                        }
+                    }
                 }
+                .padding(isCompact ? 14 : 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(24)
         }
     }
 
     private var headerRow: some View {
-        HStack(alignment: .center, spacing: 16) {
-            SectionHeaderBar(
-                title: "Storage Overview",
-                subtitle: "Disk telemetry for \(appState.volumeStats.volumeName)",
-                icon: NavigationSection.overview.icon
-            )
-
-            HStack(spacing: 10) {
-                Button {
-                    appState.chooseDirectoryAndScan()
-                } label: {
-                    Label("Choose Folder…", systemImage: "folder.badge.plus")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    appState.requestStartScan(at: FileManager.default.homeDirectoryForCurrentUser)
-                } label: {
-                    Label("Scan Home Directory", systemImage: "play.fill")
-                        .fontWeight(.semibold)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(SpaceSenseTheme.accent)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 12) {
+                SectionHeaderBar(
+                    title: "Storage Overview",
+                    subtitle: "Disk telemetry for \(appState.volumeStats.volumeName)",
+                    icon: NavigationSection.overview.icon
+                )
+                scanActionButtons
             }
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeaderBar(
+                    title: "Storage Overview",
+                    subtitle: "Disk telemetry for \(appState.volumeStats.volumeName)",
+                    icon: NavigationSection.overview.icon
+                )
+                scanActionButtons
+            }
+        }
+    }
+
+    private var scanActionButtons: some View {
+        HStack(spacing: 8) {
+            Button {
+                appState.chooseDirectoryAndScan()
+            } label: {
+                Label("Choose Folder…", systemImage: "folder.badge.plus")
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                appState.requestStartScan(at: FileManager.default.homeDirectoryForCurrentUser)
+            } label: {
+                Label("Scan Home Directory", systemImage: "play.fill")
+                    .fontWeight(.semibold)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(SpaceSenseTheme.accent)
         }
     }
 
@@ -62,8 +88,8 @@ public struct OverviewView: View {
         }()
 
         return LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 4),
-            spacing: 14
+            columns: [GridItem(.adaptive(minimum: 155, maximum: 320), spacing: 12)],
+            spacing: 12
         ) {
             MetricCardView(
                 title: "Total Capacity",
@@ -87,19 +113,24 @@ public struct OverviewView: View {
                 tint: SpaceSenseTheme.secondaryAccent,
                 tooltip: "Includes APFS purgeable space that macOS automatically frees when applications request disk storage."
             )
-            MetricCardView(
-                title: "Delete Hub Reclaimable",
-                value: ByteFormatting.string(appState.totalReclaimableBytes),
-                subtitle: "\(appState.cleanupCandidates.count) reviewable items",
-                icon: "trash.slash.fill",
-                tint: SpaceSenseTheme.secondaryAccent
-            )
+            Button {
+                appState.selectedSection = .deleteHub
+            } label: {
+                MetricCardView(
+                    title: "Delete Hub Reclaimable",
+                    value: ByteFormatting.string(appState.totalReclaimableBytes),
+                    subtitle: "\(appState.cleanupCandidates.count) reviewable items",
+                    icon: "trash.slash.fill",
+                    tint: SpaceSenseTheme.secondaryAccent
+                )
+            }
+            .buttonStyle(.plain)
         }
     }
 
     private var storageBarSection: some View {
         SurfaceCard {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Storage Breakdown by Category")
@@ -108,26 +139,31 @@ public struct OverviewView: View {
                             Text("Measured in \(result.rootURL.path) (\(ByteFormatting.string(result.rootNode.size)) across \(result.totalFilesScanned.formatted()) files)")
                                 .font(.caption)
                                 .foregroundStyle(SpaceSenseTheme.slate)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         } else {
                             Text("Click 'Scan Home Directory' to measure category sizes across your files.")
                                 .font(.caption)
                                 .foregroundStyle(SpaceSenseTheme.slate)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         }
                     }
-                    Spacer()
+                    Spacer(minLength: 8)
                     Text("\(String(format: "%.1f%%", appState.volumeStats.utilizationPercentage)) Used")
                         .font(.subheadline.monospacedDigit().weight(.semibold))
                         .foregroundStyle(SpaceSenseTheme.slate)
                 }
 
                 GeometryReader { geo in
-                    let totalWidth = max(geo.size.width - 16, 1)
                     let segments = categorySegments()
+                    let spacingTotal = CGFloat(max(0, segments.count - 1)) * 2.0
+                    let availableWidth = max(1, geo.size.width - spacingTotal)
                     HStack(spacing: 2) {
                         ForEach(segments, id: \.category) { segment in
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
                                 .fill(segment.category.color)
-                                .frame(width: max(4, totalWidth * segment.fraction))
+                                .frame(width: max(3, availableWidth * segment.fraction))
                                 .help("\(segment.category.rawValue): \(ByteFormatting.string(segment.bytes))")
                         }
                         Spacer(minLength: 0)
@@ -142,8 +178,8 @@ public struct OverviewView: View {
                 .frame(height: 16)
 
                 LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
-                    spacing: 10
+                    columns: [GridItem(.adaptive(minimum: 140, maximum: 260), spacing: 8)],
+                    spacing: 8
                 ) {
                     ForEach(StorageCategory.allCases) { category in
                         let bytes = categoryByteValue(for: category)
@@ -151,20 +187,21 @@ public struct OverviewView: View {
                             appState.analyzerCategoryFilter = category
                             appState.selectedSection = .analyzer
                         } label: {
-                            HStack(spacing: 10) {
+                            HStack(spacing: 8) {
                                 Circle()
                                     .fill(category.color)
                                     .frame(width: 9, height: 9)
-                                VStack(alignment: .leading, spacing: 2) {
+                                VStack(alignment: .leading, spacing: 1) {
                                     Text(category.rawValue)
                                         .font(.caption.weight(.semibold))
                                         .foregroundStyle(.primary)
                                         .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
                                     Text(ByteFormatting.string(bytes))
                                         .font(.caption2.monospacedDigit())
                                         .foregroundStyle(SpaceSenseTheme.slate)
                                 }
-                                Spacer()
+                                Spacer(minLength: 2)
                             }
                             .padding(8)
                             .background(
@@ -181,7 +218,7 @@ public struct OverviewView: View {
 
     private var recentLargeFilesCard: some View {
         SurfaceCard {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("Largest Detected Files")
                         .font(.headline)
@@ -194,22 +231,25 @@ public struct OverviewView: View {
                 }
 
                 if let files = appState.latestScanResult?.largeFiles, !files.isEmpty {
-                    ForEach(files.prefix(7)) { file in
-                        HStack(spacing: 10) {
+                    let topFiles = Array(files.prefix(7))
+                    ForEach(Array(topFiles.enumerated()), id: \.element.id) { idx, file in
+                        HStack(spacing: 8) {
                             Image(systemName: file.category.icon)
                                 .foregroundStyle(SpaceSenseTheme.accent)
-                                .frame(width: 22)
+                                .frame(width: 20)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(file.name)
                                     .font(.subheadline.weight(.medium))
                                     .lineLimit(1)
+                                    .minimumScaleFactor(0.85)
                                 Text("Last opened \(file.daysSinceLastOpened())d ago • \(file.path)")
                                     .font(.caption2)
                                     .foregroundStyle(SpaceSenseTheme.slate)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                    .help(file.path)
                             }
-                            Spacer()
+                            Spacer(minLength: 4)
                             Text(ByteFormatting.string(file.size))
                                 .font(.caption.monospacedDigit().weight(.semibold))
                             Button {
@@ -220,8 +260,16 @@ public struct OverviewView: View {
                             .buttonStyle(.borderless)
                             .help("Reveal in Finder")
                         }
-                        .padding(.vertical, 4)
-                        Divider()
+                        .padding(.vertical, 3)
+                        .contextMenu {
+                            Button("Reveal in Finder") { appState.revealInFinder(file.url) }
+                            Button("Open File") { appState.openFile(file.url) }
+                            Button("Copy Path") { appState.copyPathToClipboard(file.path) }
+                        }
+
+                        if idx < topFiles.count - 1 {
+                            Divider()
+                        }
                     }
                 } else {
                     VStack(spacing: 8) {
@@ -233,16 +281,16 @@ public struct OverviewView: View {
                             .foregroundStyle(SpaceSenseTheme.slate)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 28)
+                    .padding(.vertical, 24)
                 }
             }
         }
     }
 
     private var rightColumnCards: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             SurfaceCard {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Delete Hub")
                             .font(.headline)
@@ -257,16 +305,17 @@ public struct OverviewView: View {
                     Text(ByteFormatting.string(appState.totalReclaimableBytes))
                         .font(.title2.weight(.bold))
                         .foregroundStyle(SpaceSenseTheme.secondaryAccent)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
 
                     Text("Across \(appState.cleanupCandidates.count) unused large files (> \(appState.unusedFileDaysThreshold)d), exact duplicates, caches, and installers.")
                         .font(.caption)
                         .foregroundStyle(SpaceSenseTheme.slate)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             SurfaceCard {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Recent Storage Changes")
                             .font(.headline)
@@ -282,7 +331,7 @@ public struct OverviewView: View {
                         Text("Run two or more scans to see which categories and folders are growing.")
                             .font(.caption)
                             .foregroundStyle(SpaceSenseTheme.slate)
-                            .padding(.vertical, 12)
+                            .padding(.vertical, 8)
                     } else {
                         ForEach(appState.growthDeltas.prefix(5)) { delta in
                             HStack {
@@ -292,7 +341,8 @@ public struct OverviewView: View {
                                     .font(.caption.weight(.medium))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
-                                Spacer()
+                                    .help(delta.name)
+                                Spacer(minLength: 4)
                                 let sign = delta.deltaBytes >= 0 ? "+" : ""
                                 Text("\(sign)\(ByteFormatting.string(delta.deltaBytes))")
                                     .font(.caption.monospacedDigit().weight(.semibold))
@@ -302,10 +352,8 @@ public struct OverviewView: View {
                         }
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(width: 340)
     }
 
     private func categoryByteValue(for category: StorageCategory) -> Int64 {
@@ -330,10 +378,10 @@ public struct OverviewView: View {
         }
         let sumBytes = nonZero.reduce(Int64(0)) { $0 + $1.1 }
         let denominator = max(Double(sumBytes), 1)
-        let utilRatio = min(0.96, max(0.15, appState.volumeStats.utilizationPercentage / 100.0))
+        let utilRatio = min(0.96, max(0.04, appState.volumeStats.utilizationPercentage / 100.0))
         return nonZero.map { (cat, bytes) in
             let fraction = (Double(bytes) / denominator) * utilRatio
-            return (cat, bytes, CGFloat(max(0.01, fraction)))
+            return (cat, bytes, CGFloat(max(0.008, fraction)))
         }
     }
 }

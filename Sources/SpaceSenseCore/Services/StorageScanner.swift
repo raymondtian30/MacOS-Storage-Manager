@@ -15,6 +15,7 @@ public struct ScannerConfiguration: Sendable {
             "/System/Volumes/Preboot",
             "/System/Volumes/VM",
             "/System/Volumes/Update",
+            "/private/var/vm",
             "/Volumes"
         ],
         maxTreeDepth: Int = 6
@@ -49,7 +50,8 @@ public actor StorageScanner {
     }
 
     public func cachedDirectorySize(for path: String) -> Int64? {
-        directorySummaryCache[path]?.sizeBytes
+        let cleaned = Self.fastCleanPath(URL(fileURLWithPath: path).standardizedFileURL.path)
+        return directorySummaryCache[cleaned]?.sizeBytes ?? directorySummaryCache[path]?.sizeBytes
     }
 
     public func scan(
@@ -59,25 +61,24 @@ public actor StorageScanner {
     ) async throws -> ScanResult {
         let startTime = Date()
         let standardizedRoot = rootURL.standardizedFileURL
-        let rootPath = fastCleanPath(standardizedRoot.path)
+        let rootPath = Self.fastCleanPath(standardizedRoot.path)
 
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: rootPath, isDirectory: &isDir) else {
+        guard FileManager.default.fileExists(atPath: standardizedRoot.path, isDirectory: &isDir) else {
             throw ScannerError.directoryUnavailable(rootPath)
         }
         guard isDir.boolValue else {
             throw ScannerError.notADirectory(rootPath)
         }
-        guard FileManager.default.isReadableFile(atPath: rootPath) else {
+        guard FileManager.default.isReadableFile(atPath: standardizedRoot.path) else {
             throw ScannerError.permissionDenied(rootPath)
         }
 
         let volumeStats = VolumeStats.forURL(standardizedRoot)
         let normalizedExclusions = Set(
-            configuration.excludedPaths.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+            configuration.excludedPaths.map { Self.fastCleanPath(URL(fileURLWithPath: $0).standardizedFileURL.path) }
         )
 
-        // Pre-list top-level entries to compute accurate scan percentage
         let topLevelURLs = (try? FileManager.default.contentsOfDirectory(
             at: standardizedRoot,
             includingPropertiesForKeys: nil,
@@ -95,7 +96,6 @@ public actor StorageScanner {
         var largeFiles: [LargeFileItem] = []
         var allFiles: [LargeFileItem] = []
 
-        // Fast O(1) per-file direct accumulators; rolled up bottom-up at the end
         var directDirSizes: [String: Int64] = [rootPath: 0]
         var directDirCounts: [String: Int] = [rootPath: 0]
         var dirModDates: [String: Date] = [:]
@@ -108,6 +108,7 @@ public actor StorageScanner {
             .isRegularFileKey,
             .isSymbolicLinkKey,
             .isPackageKey,
+            .isVolumeKey,
             .fileAllocatedSizeKey,
             .totalFileAllocatedSizeKey,
             .fileSizeKey,
@@ -122,8 +123,8 @@ public actor StorageScanner {
             options.insert(.skipsHiddenFiles)
         }
 
-        let rootSlashCount = countSlashes(in: rootPath)
-        var seenResourceIDs: Set<Data> = []
+        let rootSlashCount = rootPath == "/" ? 0 : Self.countSlashes(in: rootPath)
+        var seenResourceIDs: Set<AnyHashable> = []
         var lastProgressEmit = Date.distantPast
 
         let enumerator = FileManager.default.enumerator(
@@ -132,7 +133,7 @@ public actor StorageScanner {
             options: options,
             errorHandler: { url, _ in
                 progress.permissionErrors += 1
-                dirAccessible[url.path] = false
+                dirAccessible[Self.fastCleanPath(url.path)] = false
                 return true
             }
         )
@@ -141,12 +142,17 @@ public actor StorageScanner {
             throw ScannerError.permissionDenied(rootPath)
         }
 
+        var loopCounter = 0
         while let itemURL = enumerator.nextObject() as? URL {
-            if (progress.filesScanned + progress.directoriesScanned) % 500 == 0 {
+            loopCounter += 1
+            if loopCounter % 500 == 0 {
                 try Task.checkCancellation()
+                if loopCounter % 2500 == 0 {
+                    await Task.yield()
+                }
             }
 
-            let itemPath = fastCleanPath(itemURL.path)
+            let itemPath = Self.fastCleanPath(itemURL.path)
 
             if shouldExclude(path: itemPath, rootPath: rootPath, excludedPaths: normalizedExclusions) {
                 enumerator.skipDescendants()
@@ -158,13 +164,13 @@ public actor StorageScanner {
                 continue
             }
 
-            // Never follow symbolic links recursively
-            if values.isSymbolicLink == true {
+            // Never follow symbolic links or cross into separate mounted volumes
+            if values.isSymbolicLink == true || (values.isVolume == true && itemPath != rootPath) {
                 enumerator.skipDescendants()
                 continue
             }
 
-            let depth = max(1, countSlashes(in: itemPath) - rootSlashCount)
+            let depth = max(1, Self.countSlashes(in: itemPath) - rootSlashCount)
             if depth == 1 {
                 seenTopLevelPaths.insert(itemPath)
             }
@@ -173,7 +179,7 @@ public actor StorageScanner {
             let isPackage = (values.isPackage == true)
             let modDate = values.contentModificationDate
             let accessDate = values.contentAccessDate ?? modDate
-            let parentPath = parentDirectoryPath(of: itemPath, fallback: rootPath)
+            let parentPath = Self.parentDirectoryPath(of: itemPath, fallback: rootPath)
 
             if isDirectory {
                 progress.directoriesScanned += 1
@@ -183,10 +189,17 @@ public actor StorageScanner {
                 }
                 parentToChildrenDirs[parentPath, default: []].append(itemPath)
             } else {
-                let resourceID = (values.fileResourceIdentifier as? NSData).map { Data(referencing: $0) }
-                if !isPackage, let resourceID {
-                    if !seenResourceIDs.insert(resourceID).inserted {
+                var resourceData: Data?
+                if !isPackage, let rawObj = values.fileResourceIdentifier as? NSObject {
+                    let hashKey = AnyHashable(rawObj)
+                    if !seenResourceIDs.insert(hashKey).inserted {
                         continue
+                    }
+                    if let nsData = rawObj as? NSData {
+                        resourceData = Data(referencing: nsData)
+                    } else {
+                        var h = rawObj.hash
+                        resourceData = Data(bytes: &h, count: MemoryLayout<Int>.size)
                     }
                 }
 
@@ -211,7 +224,6 @@ public actor StorageScanner {
                 let category = StorageCategory.classify(url: itemURL, isDirectory: isPackage)
                 categoryBytes[category, default: 0] += fileSize
 
-                // O(1) direct parent accumulation
                 directDirSizes[parentPath, default: 0] += fileSize
                 directDirCounts[parentPath, default: 0] += 1
 
@@ -222,15 +234,20 @@ public actor StorageScanner {
                     modificationDate: modDate,
                     lastAccessDate: accessDate,
                     category: category,
-                    resourceIdentifier: resourceID
+                    resourceIdentifier: resourceData
                 )
 
                 if fileSize >= configuration.minimumLargeFileBytes {
                     largeFiles.append(fileRecord)
                 }
 
-                if !isPackage && logicalSize > 0 && (logicalSize >= 8192 || allFiles.count < 5_000) && allFiles.count < 80_000 {
-                    allFiles.append(fileRecord)
+                // Always keep files >= 5 MB without bound; keep smaller files (>= 16 KB or early files) up to 75,000
+                if !isPackage && logicalSize > 0 {
+                    if fileSize >= 5 * 1024 * 1024 {
+                        allFiles.append(fileRecord)
+                    } else if (logicalSize >= 16_384 || allFiles.count < 2_500) && allFiles.count < 75_000 {
+                        allFiles.append(fileRecord)
+                    }
                 }
 
                 if depth <= configuration.maxTreeDepth {
@@ -242,22 +259,25 @@ public actor StorageScanner {
                         category: category
                     )
                     var list = parentToDirectFiles[parentPath] ?? []
-                    if list.count < 80 {
+                    if list.count < 120 {
                         list.append(fileNode)
                         parentToDirectFiles[parentPath] = list
-                    } else if let minIdx = list.enumerated().min(by: { $0.element.size < $1.element.size })?.offset,
-                              fileSize > list[minIdx].size {
-                        list[minIdx] = fileNode
+                    } else if fileSize > (list.last?.size ?? 0) {
+                        list.append(fileNode)
+                        if list.count >= 180 {
+                            list.sort { $0.size > $1.size }
+                            list = Array(list.prefix(80))
+                        }
                         parentToDirectFiles[parentPath] = list
                     }
                 }
             }
 
-            if let onProgress, (progress.filesScanned + progress.directoriesScanned) % 350 == 0 {
+            if let onProgress, loopCounter % 350 == 0 {
                 let now = Date()
                 if now.timeIntervalSince(lastProgressEmit) >= 0.12 {
                     lastProgressEmit = now
-                    let topFraction = Double(seenTopLevelPaths.count) / Double(totalTopLevelCount)
+                    let topFraction = min(1.0, Double(seenTopLevelPaths.count) / Double(totalTopLevelCount))
                     let byteFraction = min(0.95, Double(progress.bytesScanned) / Double(max(volumeStats.usedBytes, 1)))
                     progress.progressFraction = min(0.98, max(0.03, max(topFraction * 0.85, byteFraction)))
                     onProgress(progress)
@@ -266,10 +286,6 @@ public actor StorageScanner {
         }
 
         try Task.checkCancellation()
-
-        // Roll up directory sizes and Build FileNode tree bottom-up
-        var totalDirSizes: [String: Int64] = [:]
-        var totalDirCounts: [String: Int] = [:]
 
         let rootNode = buildTreeBottomUp(
             path: rootPath,
@@ -280,9 +296,7 @@ public actor StorageScanner {
             dirModDates: dirModDates,
             dirAccessible: dirAccessible,
             parentToChildrenDirs: parentToChildrenDirs,
-            parentToDirectFiles: parentToDirectFiles,
-            totalDirSizes: &totalDirSizes,
-            totalDirCounts: &totalDirCounts
+            parentToDirectFiles: parentToDirectFiles
         )
 
         progress.progressFraction = 1.0
@@ -293,7 +307,9 @@ public actor StorageScanner {
             largeFiles = Array(largeFiles.prefix(500))
         }
 
-        // Cache top 200 largest directory summaries to bound memory
+        if directorySummaryCache.count > 400 {
+            directorySummaryCache.removeAll(keepingCapacity: true)
+        }
         directorySummaryCache[rootPath] = DirectoryCacheSnapshot(
             modificationDate: dirModDates[rootPath],
             sizeBytes: rootNode.size,
@@ -324,11 +340,13 @@ public actor StorageScanner {
         )
     }
 
-    private func fastCleanPath(_ path: String) -> String {
+    public static func fastCleanPath(_ path: String) -> String {
         var result = path
-        if result.hasPrefix("/private/var/") {
+        if result.hasPrefix("/private/var/") || result == "/private/var" {
             result = String(result.dropFirst("/private".count))
-        } else if result.hasPrefix("/private/tmp/") {
+        } else if result.hasPrefix("/private/tmp/") || result == "/private/tmp" {
+            result = String(result.dropFirst("/private".count))
+        } else if result.hasPrefix("/private/etc/") || result == "/private/etc" {
             result = String(result.dropFirst("/private".count))
         }
         if result.count > 1 && result.hasSuffix("/") {
@@ -337,15 +355,15 @@ public actor StorageScanner {
         return result
     }
 
-    private func countSlashes(in path: String) -> Int {
+    private static func countSlashes(in path: String) -> Int {
         var count = 0
-        for byte in path.utf8 where byte == 47 { // '/'
+        for byte in path.utf8 where byte == 47 {
             count += 1
         }
         return count
     }
 
-    private func parentDirectoryPath(of path: String, fallback: String) -> String {
+    private static func parentDirectoryPath(of path: String, fallback: String) -> String {
         guard let lastSlash = path.lastIndex(of: "/") else { return fallback }
         if lastSlash == path.startIndex { return "/" }
         return String(path[..<lastSlash])
@@ -364,11 +382,17 @@ public actor StorageScanner {
     }
 
     private func calculatePackageSize(at packageURL: URL, modificationDate: Date?) -> Int64 {
-        let key = packageURL.path
-        if let cached = packageSizeCache[key], cached.modificationDate == modificationDate, modificationDate != nil {
+        let key = Self.fastCleanPath(packageURL.path)
+        if let modificationDate, let cached = packageSizeCache[key], cached.modificationDate == modificationDate {
             return cached.sizeBytes
         }
-        let keys: [URLResourceKey] = [.isSymbolicLinkKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]
+        let keys: [URLResourceKey] = [
+            .isSymbolicLinkKey,
+            .totalFileAllocatedSizeKey,
+            .fileAllocatedSizeKey,
+            .fileSizeKey,
+            .fileResourceIdentifierKey
+        ]
         let keySet = Set(keys)
         guard let enumerator = FileManager.default.enumerator(
             at: packageURL,
@@ -377,6 +401,7 @@ public actor StorageScanner {
         ) else {
             return 0
         }
+        var seenInodes: Set<AnyHashable> = []
         var total: Int64 = 0
         var count = 0
         while let fileURL = enumerator.nextObject() as? URL {
@@ -388,8 +413,16 @@ public actor StorageScanner {
                   values.isSymbolicLink != true else {
                 continue
             }
+            if let rawObj = values.fileResourceIdentifier as? NSObject {
+                if !seenInodes.insert(AnyHashable(rawObj)).inserted {
+                    continue
+                }
+            }
             let size = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
             total += Int64(size)
+        }
+        if packageSizeCache.count > 300 {
+            packageSizeCache.removeAll(keepingCapacity: true)
         }
         packageSizeCache[key] = PackageCacheEntry(modificationDate: modificationDate, sizeBytes: total)
         return total
@@ -404,9 +437,7 @@ public actor StorageScanner {
         dirModDates: [String: Date],
         dirAccessible: [String: Bool],
         parentToChildrenDirs: [String: [String]],
-        parentToDirectFiles: [String: [FileNode]],
-        totalDirSizes: inout [String: Int64],
-        totalDirCounts: inout [String: Int]
+        parentToDirectFiles: [String: [FileNode]]
     ) -> FileNode {
         var totalSize = directDirSizes[path] ?? 0
         var totalCount = directDirCounts[path] ?? 0
@@ -423,9 +454,7 @@ public actor StorageScanner {
                     dirModDates: dirModDates,
                     dirAccessible: dirAccessible,
                     parentToChildrenDirs: parentToChildrenDirs,
-                    parentToDirectFiles: parentToDirectFiles,
-                    totalDirSizes: &totalDirSizes,
-                    totalDirCounts: &totalDirCounts
+                    parentToDirectFiles: parentToDirectFiles
                 )
                 totalSize += childNode.size
                 totalCount += childNode.itemCount
@@ -440,9 +469,6 @@ public actor StorageScanner {
             childrenNodes.append(contentsOf: sortedFiles.prefix(50))
             childrenNodes.sort { $0.size > $1.size }
         }
-
-        totalDirSizes[path] = totalSize
-        totalDirCounts[path] = totalCount
 
         let url = URL(fileURLWithPath: path)
         return FileNode(

@@ -10,35 +10,63 @@ public struct StorageHistoryView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    SectionHeaderBar(
-                        title: "Storage History",
-                        subtitle: "Persistent SQLite storage tracking across scans (\(appState.historySnapshots.count) recorded snapshots)",
-                        icon: NavigationSection.history.icon
-                    )
+        GeometryReader { geo in
+            let isCompact = geo.size.width < 720
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    headerRow
 
-                    Button {
-                        appState.requestStartScan()
-                    } label: {
-                        Label("Record New Scan", systemImage: "plus.circle.fill")
+                    usedStorageChartCard
+
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 14) {
+                            categoryTrendChartCard
+                            growthDeltasCard
+                        }
+                        VStack(alignment: .leading, spacing: 14) {
+                            categoryTrendChartCard
+                            growthDeltasCard
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(SpaceSenseTheme.accent)
+
+                    snapshotsTableCard
                 }
-
-                usedStorageChartCard
-
-                HStack(alignment: .top, spacing: 16) {
-                    categoryTrendChartCard
-                    growthDeltasCard
-                }
-
-                snapshotsTableCard
+                .padding(isCompact ? 14 : 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(24)
         }
+    }
+
+    private var headerRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                SectionHeaderBar(
+                    title: "Storage History",
+                    subtitle: "Persistent SQLite storage tracking across scans (\(appState.historySnapshots.count) recorded snapshots)",
+                    icon: NavigationSection.history.icon
+                )
+                recordScanButton
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeaderBar(
+                    title: "Storage History",
+                    subtitle: "Persistent SQLite storage tracking across scans (\(appState.historySnapshots.count) recorded snapshots)",
+                    icon: NavigationSection.history.icon
+                )
+                recordScanButton
+            }
+        }
+    }
+
+    private var recordScanButton: some View {
+        Button {
+            appState.requestStartScan()
+        } label: {
+            Label("Record New Scan", systemImage: "plus.circle.fill")
+                .lineLimit(1)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(SpaceSenseTheme.accent)
     }
 
     private var usedStorageChartCard: some View {
@@ -60,7 +88,7 @@ public struct StorageHistoryView: View {
                         .font(.caption)
                         .foregroundStyle(SpaceSenseTheme.slate)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 36)
+                        .padding(.vertical, 32)
                 } else {
                     Chart {
                         ForEach(appState.historySnapshots) { snap in
@@ -92,7 +120,7 @@ public struct StorageHistoryView: View {
                         }
                     }
                     .chartYAxisLabel("GB Used")
-                    .frame(height: 210)
+                    .frame(height: 200)
                 }
             }
         }
@@ -104,6 +132,7 @@ public struct StorageHistoryView: View {
                 HStack {
                     Text("Category Growth Trend")
                         .font(.headline)
+                        .lineLimit(1)
                     Spacer()
                     Picker("Category", selection: $selectedCategoryForChart) {
                         ForEach(StorageCategory.allCases) { cat in
@@ -112,7 +141,7 @@ public struct StorageHistoryView: View {
                     }
                     .labelsHidden()
                     .controlSize(.small)
-                    .frame(width: 150)
+                    .frame(minWidth: 120, maxWidth: 150)
                 }
 
                 if appState.historySnapshots.isEmpty {
@@ -120,21 +149,22 @@ public struct StorageHistoryView: View {
                         .font(.caption)
                         .foregroundStyle(SpaceSenseTheme.slate)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 36)
+                        .padding(.vertical, 32)
                 } else {
+                    let recent = Array(appState.historySnapshots.suffix(12))
                     Chart {
-                        ForEach(appState.historySnapshots) { snap in
+                        ForEach(recent) { snap in
                             let catBytes = snap.categoryBreakdown[selectedCategoryForChart.rawValue] ?? 0
                             let mbValue = Double(catBytes) / 1_000_000.0
                             BarMark(
-                                x: .value("Scan", "#\(snap.id) \(snap.timestamp.formatted(date: .omitted, time: .shortened))"),
+                                x: .value("Scan", "#\(snap.id)"),
                                 y: .value("Size (MB)", mbValue)
                             )
                             .foregroundStyle(SpaceSenseTheme.secondaryAccent)
                         }
                     }
                     .chartYAxisLabel("MB")
-                    .frame(height: 180)
+                    .frame(height: 175)
                 }
             }
         }
@@ -146,6 +176,7 @@ public struct StorageHistoryView: View {
                 HStack(spacing: 6) {
                     Text("Growing Categories & Folders")
                         .font(.headline)
+                        .lineLimit(1)
                     InfoTooltipIcon("Compares the two most recent scans of the same root folder to highlight where new disk usage is accumulating.")
                 }
                 Text("Changes between your two most recent scans")
@@ -156,7 +187,7 @@ public struct StorageHistoryView: View {
                     Text("Run at least two scans of the same directory to compare growth.")
                         .font(.caption)
                         .foregroundStyle(SpaceSenseTheme.slate)
-                        .padding(.vertical, 32)
+                        .padding(.vertical, 28)
                 } else {
                     ForEach(appState.growthDeltas.prefix(8)) { delta in
                         HStack(spacing: 8) {
@@ -167,21 +198,21 @@ public struct StorageHistoryView: View {
                                     .font(.caption.weight(.medium))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                    .help(delta.name)
                                 Text("\(ByteFormatting.string(delta.previousBytes)) → \(ByteFormatting.string(delta.currentBytes))")
                                     .font(.caption2)
                                     .foregroundStyle(SpaceSenseTheme.slate)
                             }
-                            Spacer()
+                            Spacer(minLength: 4)
                             let sign = delta.deltaBytes >= 0 ? "+" : ""
                             Text("\(sign)\(ByteFormatting.string(delta.deltaBytes))")
                                 .font(.caption.monospacedDigit().weight(.bold))
                                 .foregroundStyle(delta.deltaBytes >= 0 ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
                         }
-                        .padding(.vertical, 3)
+                        .padding(.vertical, 2)
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -196,7 +227,8 @@ public struct StorageHistoryView: View {
                         .font(.caption)
                         .foregroundStyle(SpaceSenseTheme.slate)
                 } else {
-                    ForEach(appState.historySnapshots.reversed().prefix(15)) { snap in
+                    let snaps = Array(appState.historySnapshots.reversed().prefix(15))
+                    ForEach(Array(snaps.enumerated()), id: \.element.id) { idx, snap in
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(snap.timestamp.formatted(date: .abbreviated, time: .standard))
@@ -204,8 +236,11 @@ public struct StorageHistoryView: View {
                                 Text("Scanned path: \(snap.scannedPath)")
                                     .font(.caption2.monospaced())
                                     .foregroundStyle(SpaceSenseTheme.slate)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .help(snap.scannedPath)
                             }
-                            Spacer()
+                            Spacer(minLength: 8)
                             VStack(alignment: .trailing, spacing: 2) {
                                 Text("Folder Size: \(ByteFormatting.string(snap.scannedRootBytes))")
                                     .font(.caption.monospacedDigit().weight(.semibold))
@@ -214,8 +249,11 @@ public struct StorageHistoryView: View {
                                     .foregroundStyle(SpaceSenseTheme.slate)
                             }
                         }
-                        .padding(.vertical, 4)
-                        Divider()
+                        .padding(.vertical, 3)
+
+                        if idx < snaps.count - 1 {
+                            Divider()
+                        }
                     }
                 }
             }

@@ -19,20 +19,19 @@ public actor DuplicateDetector {
     }
 
     /// Finds exact duplicate files using a 3-stage pipeline:
-    /// 1. Group files by exact byte size (filtering out files smaller than `minimumBytes`).
+    /// 1. Group files by exact logical byte size (excluding hard links and dataless cloud files).
     /// 2. For groups with >1 file, compute a fast partial SHA-256 hash (first 32 KB + last 32 KB) for files > 64 KB.
-    /// 3. For matching partial hashes, compute the full streaming SHA-256 digest using CryptoKit.
+    /// 3. For matching partial hashes, compute the full streaming SHA-256 digest using CryptoKit, verifying total bytes read.
     public func findDuplicates(
         in candidates: [LargeFileItem],
-        minimumBytes: Int64 = 100 * 1024, // 100 KB default
+        minimumBytes: Int64 = 100 * 1024,
         onProgress: (@Sendable (Int, Int) -> Void)? = nil
     ) async throws -> [DuplicateGroup] {
         try Task.checkCancellation()
 
-        // Stage 1: Group by exact logical byte size (never group by filename) and deduplicate hard links
         var sizeGroups: [Int64: [LargeFileItem]] = [:]
         var seenInodes: Set<Data> = []
-        for item in candidates where item.logicalSize >= minimumBytes {
+        for item in candidates where item.logicalSize >= minimumBytes && item.size > 0 {
             if let inode = item.resourceIdentifier {
                 if !seenInodes.insert(inode).inserted {
                     continue
@@ -51,7 +50,6 @@ public actor DuplicateDetector {
             try Task.checkCancellation()
             guard let logicalFileSize = group.first?.logicalSize else { continue }
 
-            // Stage 2: Partial hash check for files > 64 KB
             let partialThreshold: Int64 = 64 * 1024
             var partialBuckets: [String: [LargeFileItem]] = [:]
 
@@ -69,13 +67,11 @@ public actor DuplicateDetector {
                 partialBuckets["small-file-direct-full-hash"] = group
             }
 
-            // Account for Stage 2 non-colliding files in progress
             for (_, subGroup) in partialBuckets where subGroup.count == 1 {
                 processedFiles += 1
                 onProgress?(processedFiles, max(totalCandidateFiles, 1))
             }
 
-            // Stage 3: Full SHA-256 hash for files that collided on size + partial hash
             for (_, subGroup) in partialBuckets where subGroup.count > 1 {
                 var fullBuckets: [String: [LargeFileItem]] = [:]
                 for file in subGroup {
@@ -88,8 +84,13 @@ public actor DuplicateDetector {
                 }
 
                 for (sha256, matchedFiles) in fullBuckets where matchedFiles.count > 1 {
-                    // Sort so oldest or shortest-path original stays first (unmarked), newer copies can be reviewed
+                    // Prefer keeping files in Documents/Desktop over copies in Downloads/Caches
                     let sorted = matchedFiles.sorted { lhs, rhs in
+                        let lPriority = Self.locationRetentionPriority(for: lhs.path)
+                        let rPriority = Self.locationRetentionPriority(for: rhs.path)
+                        if lPriority != rPriority {
+                            return lPriority > rPriority
+                        }
                         let lDate = lhs.modificationDate ?? .distantPast
                         let rDate = rhs.modificationDate ?? .distantPast
                         if lDate != rDate {
@@ -101,16 +102,16 @@ public actor DuplicateDetector {
                     let items = sorted.enumerated().map { index, item in
                         DuplicateFileItem(
                             url: item.url,
-                            size: item.logicalSize,
+                            size: item.size,
                             modificationDate: item.modificationDate,
-                            isMarkedForRemoval: index > 0 // Keep first copy by default
+                            isMarkedForRemoval: index > 0
                         )
                     }
 
                     duplicateGroups.append(
                         DuplicateGroup(
                             sha256Hash: sha256,
-                            fileSize: logicalFileSize,
+                            fileSize: sorted.first?.size ?? logicalFileSize,
                             files: items
                         )
                     )
@@ -122,6 +123,29 @@ public actor DuplicateDetector {
         return duplicateGroups
     }
 
+    private static func locationRetentionPriority(for path: String) -> Int {
+        let lower = path.lowercased()
+        if lower.contains("/trash/") || lower.contains("/.trash/") || lower.contains("/caches/") {
+            return 0
+        }
+        if lower.contains("/downloads/") {
+            return 1
+        }
+        if lower.contains("/documents/") || lower.contains("/desktop/") || lower.contains("/pictures/") {
+            return 3
+        }
+        return 2
+    }
+
+    private func isLocallyAvailable(_ url: URL) -> Bool {
+        if let values = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]),
+           let status = values.ubiquitousItemDownloadingStatus,
+           status != .current {
+            return false
+        }
+        return true
+    }
+
     private func cacheKey(for item: LargeFileItem) -> FileDigestCacheKey {
         FileDigestCacheKey(
             path: item.path,
@@ -131,6 +155,7 @@ public actor DuplicateDetector {
     }
 
     private func computePartialSHA256(for item: LargeFileItem) -> String? {
+        guard isLocallyAvailable(item.url) else { return nil }
         let key = cacheKey(for: item)
         if let cached = partialHashCache[key] {
             return cached
@@ -143,17 +168,19 @@ public actor DuplicateDetector {
         let chunkSize = 32 * 1024
         var hasher = SHA256()
 
-        guard let headData = try? handle.read(upToCount: chunkSize) else {
+        guard let headData = try? handle.read(upToCount: chunkSize), !headData.isEmpty else {
             return nil
         }
         hasher.update(data: headData)
 
         if item.logicalSize > Int64(chunkSize * 2) {
             let tailOffset = UInt64(max(0, item.logicalSize - Int64(chunkSize)))
-            if (try? handle.seek(toOffset: tailOffset)) != nil,
-               let tailData = try? handle.read(upToCount: chunkSize) {
-                hasher.update(data: tailData)
+            guard (try? handle.seek(toOffset: tailOffset)) != nil,
+                  let tailData = try? handle.read(upToCount: chunkSize),
+                  tailData.count == chunkSize else {
+                return nil
             }
+            hasher.update(data: tailData)
         }
 
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
@@ -162,6 +189,7 @@ public actor DuplicateDetector {
     }
 
     private func computeFullSHA256(for item: LargeFileItem) throws -> String? {
+        guard isLocallyAvailable(item.url) else { return nil }
         let key = cacheKey(for: item)
         if let cached = fullHashCache[key] {
             return cached
@@ -173,13 +201,26 @@ public actor DuplicateDetector {
 
         var hasher = SHA256()
         let bufferSize = 256 * 1024
+        var totalBytesRead: Int64 = 0
 
         while true {
             try Task.checkCancellation()
-            guard let chunk = try? handle.read(upToCount: bufferSize), !chunk.isEmpty else {
+            let chunk: Data?
+            do {
+                chunk = try handle.read(upToCount: bufferSize)
+            } catch {
+                // Never treat a mid-stream read error as EOF
+                return nil
+            }
+            guard let chunk, !chunk.isEmpty else {
                 break
             }
+            totalBytesRead += Int64(chunk.count)
             hasher.update(data: chunk)
+        }
+
+        guard totalBytesRead == item.logicalSize, totalBytesRead > 0 else {
+            return nil
         }
 
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()

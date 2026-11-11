@@ -19,95 +19,119 @@ public struct AIAssistantView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        GeometryReader { geo in
+            let isCompact = geo.size.width < 720
+            VStack(alignment: .leading, spacing: 12) {
+                headerRow
+
+                if !appState.hasConfiguredAPIKey {
+                    SurfaceCard(padding: 12) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "key.fill")
+                                .foregroundStyle(SpaceSenseTheme.accent)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("API Key Required for AI Responses")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Paste any API key (Gemini, OpenAI, Anthropic, Groq, xAI, or OpenRouter) in Settings for automatic model detection.")
+                                    .font(.caption)
+                                    .foregroundStyle(SpaceSenseTheme.slate)
+                            }
+                            Spacer(minLength: 4)
+                            Button("Configure API Key") {
+                                appState.selectedSection = .settings
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(SpaceSenseTheme.accent)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+
+                suggestedPromptsStrip
+
+                SurfaceCard(padding: 12) {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 12) {
+                                ForEach(appState.aiMessages) { msg in
+                                    messageBubble(msg)
+                                        .id(msg.id)
+                                }
+                                if appState.isAIThinking {
+                                    HStack(spacing: 8) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                        Text("Analyzing your storage telemetry with \(appState.geminiModel)…")
+                                            .font(.caption)
+                                            .foregroundStyle(SpaceSenseTheme.slate)
+                                    }
+                                    .padding(10)
+                                }
+                            }
+                        }
+                        .onChange(of: appState.aiMessages.count) { _, _ in
+                            if let lastID = appState.aiMessages.last?.id {
+                                withAnimation {
+                                    proxy.scrollTo(lastID, anchor: .bottom)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: .infinity)
+
+                inputBar
+            }
+            .padding(isCompact ? 14 : 20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .sheet(isPresented: $showingContextInspector) {
+            TelemetryPreviewSheet(contextText: appState.currentAIContextSummary())
+        }
+    }
+
+    private var headerRow: some View {
+        ViewThatFits(in: .horizontal) {
             HStack(spacing: 10) {
                 SectionHeaderBar(
                     title: "AI Storage Assistant",
                     subtitle: "\(appState.detectedAIProvider.rawValue) (\(appState.geminiModel)) — grounded strictly in your actual scan telemetry",
                     icon: NavigationSection.aiAssistant.icon
                 )
-
-                Button {
-                    appState.clearAIChat()
-                } label: {
-                    Label("Clear Chat", systemImage: "trash")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .disabled(appState.isAIThinking)
-
-                Button {
-                    showingContextInspector = true
-                } label: {
-                    Label("Shared Telemetry", systemImage: "eye")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-
-                InfoTooltipIcon("SpaceSense never uploads file contents. Only the aggregated folder sizes and file metadata shown in Shared Telemetry are sent to your chosen AI model.")
+                headerButtons
             }
-
-            if !appState.hasConfiguredAPIKey {
-                SurfaceCard(padding: 12) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "key.fill")
-                            .foregroundStyle(SpaceSenseTheme.accent)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("API Key Required for AI Responses")
-                                .font(.subheadline.weight(.semibold))
-                            Text("Paste any API key (Gemini, OpenAI, Anthropic, Groq, xAI, or OpenRouter) in Settings for automatic model detection.")
-                                .font(.caption)
-                                .foregroundStyle(SpaceSenseTheme.slate)
-                        }
-                        Spacer()
-                        Button("Configure API Key") {
-                            appState.selectedSection = .settings
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(SpaceSenseTheme.accent)
-                        .controlSize(.small)
-                    }
-                }
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeaderBar(
+                    title: "AI Storage Assistant",
+                    subtitle: "\(appState.detectedAIProvider.rawValue) (\(appState.geminiModel)) — grounded strictly in your actual scan telemetry",
+                    icon: NavigationSection.aiAssistant.icon
+                )
+                headerButtons
             }
-
-            suggestedPromptsStrip
-
-            SurfaceCard(padding: 14) {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(appState.aiMessages) { msg in
-                                messageBubble(msg)
-                                    .id(msg.id)
-                            }
-                            if appState.isAIThinking {
-                                HStack(spacing: 8) {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                    Text("Analyzing your storage telemetry with \(appState.geminiModel)…")
-                                        .font(.caption)
-                                        .foregroundStyle(SpaceSenseTheme.slate)
-                                }
-                                .padding(10)
-                            }
-                        }
-                    }
-                    .onChange(of: appState.aiMessages.count) { _, _ in
-                        if let lastID = appState.aiMessages.last?.id {
-                            withAnimation {
-                                proxy.scrollTo(lastID, anchor: .bottom)
-                            }
-                        }
-                    }
-                }
-            }
-            .frame(maxHeight: .infinity)
-
-            inputBar
         }
-        .padding(24)
-        .sheet(isPresented: $showingContextInspector) {
-            TelemetryPreviewSheet(contextText: appState.currentAIContextSummary())
+    }
+
+    private var headerButtons: some View {
+        HStack(spacing: 8) {
+            Button {
+                appState.clearAIChat()
+            } label: {
+                Label("Clear Chat", systemImage: "trash")
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                showingContextInspector = true
+            } label: {
+                Label("Shared Telemetry", systemImage: "eye")
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+
+            InfoTooltipIcon("SpaceSense never uploads file contents. Only the aggregated folder sizes and file metadata shown in Shared Telemetry are sent to your chosen AI model.")
         }
     }
 
@@ -123,6 +147,7 @@ public struct AIAssistantView: View {
                                 .font(.caption2)
                             Text(prompt)
                                 .font(.caption)
+                                .lineLimit(1)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -148,7 +173,7 @@ public struct AIAssistantView: View {
                         in: Circle()
                     )
             } else {
-                Spacer()
+                Spacer(minLength: 24)
             }
 
             VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
@@ -171,7 +196,7 @@ public struct AIAssistantView: View {
             .frame(maxWidth: 680, alignment: message.role == .user ? .trailing : .leading)
 
             if message.role == .assistant {
-                Spacer()
+                Spacer(minLength: 24)
             }
         }
     }
@@ -190,6 +215,7 @@ public struct AIAssistantView: View {
                 } label: {
                     Label("Ask AI", systemImage: "paperplane.fill")
                         .fontWeight(.semibold)
+                        .lineLimit(1)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(SpaceSenseTheme.accent)
@@ -236,6 +262,6 @@ private struct TelemetryPreviewSheet: View {
             .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(20)
-        .frame(width: 640, height: 480)
+        .frame(minWidth: 460, idealWidth: 600, maxWidth: 680, minHeight: 340, idealHeight: 460, maxHeight: 540)
     }
 }

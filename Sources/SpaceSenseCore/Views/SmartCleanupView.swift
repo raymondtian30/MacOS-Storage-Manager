@@ -5,9 +5,17 @@ public struct SmartCleanupView: View {
     @Bindable var appState: AppState
 
     public enum HubMode: String, CaseIterable, Identifiable {
-        case recommendations = "Safe & Unused Recommendations"
-        case largeFiles = "All Large Files (250 MB – 1 GB+)"
-        case duplicates = "Duplicate Groups (SHA-256)"
+        case recommendations = "Recommendations"
+        case largeFiles = "Large Files"
+        case duplicates = "Duplicates (SHA-256)"
+
+        public var id: String { rawValue }
+    }
+
+    public enum LargeFileSortOrder: String, CaseIterable, Identifiable {
+        case sizeDesc = "Largest First"
+        case unusedDesc = "Most Unused First"
+        case nameAsc = "Name (A–Z)"
 
         public var id: String { rawValue }
     }
@@ -17,6 +25,7 @@ public struct SmartCleanupView: View {
     @State private var searchText: String = ""
     @State private var extensionFilter: String = ""
     @State private var onlyUnusedLargeFiles: Bool = false
+    @State private var largeFileSortOrder: LargeFileSortOrder = .sizeDesc
     @State private var selectedLargeFileIDs: Set<String> = []
     @State private var previewingFile: LargeFileItem?
     @State private var showingReviewSheet: Bool = false
@@ -26,20 +35,24 @@ public struct SmartCleanupView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            headerBar
-            modeSelectorBar
+        GeometryReader { geo in
+            let isCompact = geo.size.width < 720
+            VStack(alignment: .leading, spacing: 12) {
+                headerBar
+                modeSelectorBar
 
-            switch hubMode {
-            case .recommendations:
-                recommendationsContent
-            case .largeFiles:
-                largeFilesContent
-            case .duplicates:
-                duplicatesContent
+                switch hubMode {
+                case .recommendations:
+                    recommendationsContent
+                case .largeFiles:
+                    largeFilesContent
+                case .duplicates:
+                    duplicatesContent
+                }
             }
+            .padding(isCompact ? 14 : 20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(24)
         .sheet(item: $previewingFile) { item in
             DeleteHubPreviewModal(file: item, appState: appState)
         }
@@ -50,19 +63,34 @@ public struct SmartCleanupView: View {
 
     private var headerBar: some View {
         let activeSelection = currentActionSummary()
-        return HStack(spacing: 12) {
-            SectionHeaderBar(
-                title: "Delete Hub",
-                subtitle: "Unified center for unused large files (> \(appState.unusedFileDaysThreshold)d), duplicates, caches, and safe cleanup",
-                icon: NavigationSection.deleteHub.icon
-            )
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                SectionHeaderBar(
+                    title: "Delete Hub",
+                    subtitle: "Unused large files (> \(appState.unusedFileDaysThreshold)d), duplicates, caches, and safe cleanup",
+                    icon: NavigationSection.deleteHub.icon
+                )
+                headerActionButtons(activeSelection: activeSelection)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                SectionHeaderBar(
+                    title: "Delete Hub",
+                    subtitle: "Unused large files (> \(appState.unusedFileDaysThreshold)d), duplicates, caches, and safe cleanup",
+                    icon: NavigationSection.deleteHub.icon
+                )
+                headerActionButtons(activeSelection: activeSelection)
+            }
+        }
+    }
 
+    private func headerActionButtons(activeSelection: (urls: [URL], sizes: [URL: Int64], descriptions: [(name: String, path: String, size: Int64)], count: Int, bytes: Int64)) -> some View {
+        HStack(spacing: 8) {
             Button {
                 Task {
                     await appState.refreshCleanupRecommendationsAsync()
                 }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     if appState.isRefreshingCleanup {
                         ProgressView()
                             .controlSize(.small)
@@ -70,6 +98,7 @@ public struct SmartCleanupView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                     Text(appState.isRefreshingCleanup ? "Analyzing…" : "Refresh Options")
+                        .lineLimit(1)
                 }
             }
             .buttonStyle(.bordered)
@@ -79,59 +108,76 @@ public struct SmartCleanupView: View {
                 showingReviewSheet = true
             } label: {
                 Label(
-                    "Review & Move \(activeSelection.count) to Trash (\(ByteFormatting.string(activeSelection.bytes)))",
+                    "Move \(activeSelection.count) to Trash (\(ByteFormatting.string(activeSelection.bytes)))",
                     systemImage: "trash.fill"
                 )
                 .fontWeight(.semibold)
+                .lineLimit(1)
             }
             .buttonStyle(.borderedProminent)
-            .tint(SpaceSenseTheme.secondaryAccent)
+            .tint(SpaceSenseTheme.accent)
             .disabled(activeSelection.count == 0)
         }
     }
 
     private var modeSelectorBar: some View {
-        SurfaceCard(padding: 12) {
-            HStack(spacing: 14) {
-                Picker("View", selection: $hubMode) {
-                    ForEach(HubMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
+        SurfaceCard(padding: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    modePicker
+                    Spacer(minLength: 8)
+                    thresholdPickers
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    modePicker
+                    thresholdPickers
+                }
+            }
+        }
+    }
+
+    private var modePicker: some View {
+        Picker("View", selection: $hubMode) {
+            ForEach(HubMode.allCases) { mode in
+                Text(mode.rawValue).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(minWidth: 240, maxWidth: 420)
+    }
+
+    private var thresholdPickers: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 5) {
+                Text("Unused:")
+                    .font(.caption)
+                    .foregroundStyle(SpaceSenseTheme.slate)
+                    .lineLimit(1)
+                Picker("Unused Period", selection: $appState.unusedFileDaysThreshold) {
+                    ForEach(AppState.unusedDaysOptions, id: \.days) { opt in
+                        Text(opt.label).tag(opt.days)
                     }
                 }
-                .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(maxWidth: 620)
+                .controlSize(.small)
+                .frame(minWidth: 95, maxWidth: 125)
+                InfoTooltipIcon("Files that have not been opened or modified in macOS for at least this many days are flagged as Unused Large Files.")
+            }
 
-                Spacer()
-
-                HStack(spacing: 6) {
-                    Text("Unused Period:")
-                        .font(.caption)
-                        .foregroundStyle(SpaceSenseTheme.slate)
-                    Picker("Unused Period", selection: $appState.unusedFileDaysThreshold) {
-                        ForEach(AppState.unusedDaysOptions, id: \.days) { opt in
-                            Text(opt.label).tag(opt.days)
-                        }
+            HStack(spacing: 5) {
+                Text("Min Size:")
+                    .font(.caption)
+                    .foregroundStyle(SpaceSenseTheme.slate)
+                    .lineLimit(1)
+                Picker("Large File Size", selection: $appState.largeFileThresholdMB) {
+                    ForEach(AppState.largeFileThresholdOptionsMB, id: \.value) { opt in
+                        Text(opt.label).tag(opt.value)
                     }
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .frame(width: 115)
-                    InfoTooltipIcon("Files that have not been opened or modified in macOS for at least this many days are flagged as Unused Large Files.")
                 }
-
-                HStack(spacing: 6) {
-                    Text("Large Size:")
-                        .font(.caption)
-                        .foregroundStyle(SpaceSenseTheme.slate)
-                    Picker("Large File Size", selection: $appState.largeFileThresholdMB) {
-                        ForEach(AppState.largeFileThresholdOptionsMB, id: \.value) { opt in
-                            Text(opt.label).tag(opt.value)
-                        }
-                    }
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .frame(width: 90)
-                }
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(minWidth: 80, maxWidth: 95)
             }
         }
     }
@@ -140,10 +186,10 @@ public struct SmartCleanupView: View {
 
     private var recommendationsContent: some View {
         let filtered = filteredCandidates()
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         filterPill(title: "All (\(appState.cleanupCandidates.count))", isSelected: selectedKindFilter == nil) {
                             selectedKindFilter = nil
                         }
@@ -156,7 +202,7 @@ public struct SmartCleanupView: View {
                     }
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 Button("Select All Safe") {
                     for idx in appState.cleanupCandidates.indices {
@@ -171,8 +217,11 @@ public struct SmartCleanupView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                Button("Clear Selection") {
+                Button("Clear") {
                     for idx in appState.cleanupCandidates.indices {
+                        if let filter = selectedKindFilter, appState.cleanupCandidates[idx].kind != filter {
+                            continue
+                        }
                         appState.cleanupCandidates[idx].isSelected = false
                     }
                 }
@@ -197,7 +246,7 @@ public struct SmartCleanupView: View {
     }
 
     private func candidateRow(_ candidate: CleanupCandidate) -> some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: 10) {
             Toggle(
                 "",
                 isOn: Binding(
@@ -214,21 +263,24 @@ public struct SmartCleanupView: View {
             .padding(.top, 4)
 
             Image(systemName: candidate.kind.icon)
-                .font(.title3)
+                .font(.body)
                 .foregroundStyle(SpaceSenseTheme.accent)
-                .frame(width: 26)
+                .frame(width: 22)
                 .padding(.top, 2)
 
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
                     Text(candidate.title)
                         .font(.subheadline.weight(.bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
 
                     Text(candidate.kind.rawValue)
                         .font(.caption2.weight(.medium))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(SpaceSenseTheme.slate.opacity(0.15), in: Capsule())
+                        .lineLimit(1)
 
                     Text(candidate.risk.rawValue)
                         .font(.caption2.weight(.semibold))
@@ -236,12 +288,7 @@ public struct SmartCleanupView: View {
                         .padding(.vertical, 2)
                         .background(candidate.risk.color.opacity(0.18), in: Capsule())
                         .foregroundStyle(candidate.risk.color)
-
-                    if let lastUsed = candidate.lastUsedDate {
-                        Text("Last used \(lastUsed.formatted(date: .abbreviated, time: .omitted))")
-                            .font(.caption2)
-                            .foregroundStyle(SpaceSenseTheme.slate)
-                    }
+                        .lineLimit(1)
                 }
 
                 Text(candidate.locationURL.path)
@@ -249,58 +296,130 @@ public struct SmartCleanupView: View {
                     .foregroundStyle(SpaceSenseTheme.slate)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(candidate.locationURL.path)
 
                 Text("\(candidate.whyRecommended) • \(candidate.potentialConsequences)")
                     .font(.caption)
                     .foregroundStyle(SpaceSenseTheme.slate)
+                    .lineLimit(2)
             }
 
-            Spacer()
+            Spacer(minLength: 6)
 
-            VStack(alignment: .trailing, spacing: 6) {
+            VStack(alignment: .trailing, spacing: 5) {
                 Text(ByteFormatting.string(candidate.sizeBytes))
-                    .font(.headline.monospacedDigit())
+                    .font(.subheadline.monospacedDigit().weight(.bold))
+                    .lineLimit(1)
 
-                Button {
-                    appState.revealInFinder(candidate.locationURL)
-                } label: {
-                    Label("Reveal", systemImage: "folder")
-                        .font(.caption)
+                HStack(spacing: 4) {
+                    if candidate.kind != .applicationCaches && candidate.kind != .developerArtifacts {
+                        Button {
+                            previewingFile = LargeFileItem(
+                                url: candidate.locationURL,
+                                size: candidate.sizeBytes,
+                                modificationDate: candidate.lastUsedDate,
+                                lastAccessDate: candidate.lastUsedDate
+                            )
+                        } label: {
+                            Image(systemName: "eye")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("Preview File")
+                    }
+
+                    Button {
+                        appState.revealInFinder(candidate.locationURL)
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Reveal in Finder")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if let idx = appState.cleanupCandidates.firstIndex(where: { $0.id == candidate.id }) {
+                appState.cleanupCandidates[idx].isSelected.toggle()
+            }
+        }
+        .contextMenu {
+            Button("Reveal in Finder") { appState.revealInFinder(candidate.locationURL) }
+            Button("Open") { appState.openFile(candidate.locationURL) }
+            Button("Copy Path") { appState.copyPathToClipboard(candidate.locationURL.path) }
+        }
     }
 
     // MARK: - 2. Large Files Mode (250 MB – 1 GB+)
 
     private var largeFilesContent: some View {
         let files = filteredLargeFiles()
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                TextField("Search filename or path…", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
+        return VStack(alignment: .leading, spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    TextField("Search filename or path…", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.small)
+                        .frame(minWidth: 110)
+
+                    TextField("Ext", text: $extensionFilter)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.small)
+                        .frame(width: 75)
+
+                    Toggle("Unused >= \(appState.unusedFileDaysThreshold)d", isOn: $onlyUnusedLargeFiles)
+                        .font(.caption)
+                        .toggleStyle(.checkbox)
+
+                    Picker("Sort", selection: $largeFileSortOrder) {
+                        ForEach(LargeFileSortOrder.allCases) { order in
+                            Text(order.rawValue).tag(order)
+                        }
+                    }
+                    .labelsHidden()
                     .controlSize(.small)
+                    .frame(width: 135)
 
-                TextField("Ext (e.g. mov, dmg)", text: $extensionFilter)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.small)
-                    .frame(width: 140)
+                    Spacer(minLength: 4)
 
-                Toggle("Only unused >= \(appState.unusedFileDaysThreshold) days", isOn: $onlyUnusedLargeFiles)
-                    .font(.caption)
-                    .toggleStyle(.checkbox)
-
-                Spacer()
+                    largeFileSelectionButtons(files: files)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        TextField("Search filename or path…", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                        TextField("Ext", text: $extensionFilter)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                            .frame(width: 75)
+                    }
+                    HStack(spacing: 8) {
+                        Toggle("Unused >= \(appState.unusedFileDaysThreshold)d", isOn: $onlyUnusedLargeFiles)
+                            .font(.caption)
+                            .toggleStyle(.checkbox)
+                        Picker("Sort", selection: $largeFileSortOrder) {
+                            ForEach(LargeFileSortOrder.allCases) { order in
+                                Text(order.rawValue).tag(order)
+                            }
+                        }
+                        .labelsHidden()
+                        .controlSize(.small)
+                        .frame(width: 135)
+                        Spacer()
+                        largeFileSelectionButtons(files: files)
+                    }
+                }
             }
 
             SurfaceCard(padding: 0) {
                 if files.isEmpty {
                     emptyHubState(
                         title: appState.latestScanResult == nil ? "Run a Storage Scan First" : "No Files >= \(Int(appState.largeFileThresholdMB)) MB Match Filters",
-                        detail: "Change the Large Size threshold between 250 MB and 1 GB above or clear your search filter."
+                        detail: "Change the Min Size threshold between 250 MB and 1 GB above or clear your search filter."
                     )
                 } else {
                     List(files) { file in
@@ -312,12 +431,32 @@ public struct SmartCleanupView: View {
         }
     }
 
+    private func largeFileSelectionButtons(files: [LargeFileItem]) -> some View {
+        HStack(spacing: 6) {
+            Button("Select All") {
+                for f in files {
+                    selectedLargeFileIDs.insert(f.id)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Button("Clear") {
+                for f in files {
+                    selectedLargeFileIDs.remove(f.id)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
     private func largeFileRow(_ file: LargeFileItem) -> some View {
         let isSelected = selectedLargeFileIDs.contains(file.id)
         let daysUnused = file.daysSinceLastOpened()
         let isStale = daysUnused >= appState.unusedFileDaysThreshold
 
-        return HStack(spacing: 12) {
+        return HStack(spacing: 10) {
             Toggle(
                 "",
                 isOn: Binding(
@@ -336,13 +475,14 @@ public struct SmartCleanupView: View {
 
             Image(nsImage: NSWorkspace.shared.icon(forFile: file.path))
                 .resizable()
-                .frame(width: 24, height: 24)
+                .frame(width: 22, height: 22)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(file.name)
                         .font(.subheadline.weight(.medium))
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                     if isStale {
                         Text("Unused \(daysUnused)d")
                             .font(.caption2.weight(.semibold))
@@ -350,10 +490,12 @@ public struct SmartCleanupView: View {
                             .padding(.vertical, 1)
                             .background(SpaceSenseTheme.secondaryAccent.opacity(0.18), in: Capsule())
                             .foregroundStyle(SpaceSenseTheme.secondaryAccent)
+                            .lineLimit(1)
                     } else {
                         Text("Opened \(daysUnused)d ago")
                             .font(.caption2)
                             .foregroundStyle(SpaceSenseTheme.slate)
+                            .lineLimit(1)
                     }
                 }
                 Text(file.path)
@@ -361,15 +503,16 @@ public struct SmartCleanupView: View {
                     .foregroundStyle(SpaceSenseTheme.slate)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(file.path)
             }
 
-            Spacer()
+            Spacer(minLength: 4)
 
             Text(ByteFormatting.string(file.size))
                 .font(.subheadline.monospacedDigit().weight(.bold))
-                .frame(width: 90, alignment: .trailing)
+                .lineLimit(1)
 
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Button {
                     previewingFile = file
                 } label: {
@@ -398,34 +541,50 @@ public struct SmartCleanupView: View {
                 .help("Open File")
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isSelected {
+                selectedLargeFileIDs.remove(file.id)
+            } else {
+                selectedLargeFileIDs.insert(file.id)
+            }
+        }
+        .contextMenu {
+            Button("Preview File") { previewingFile = file }
+            Button("Reveal in Finder") { appState.revealInFinder(file.url) }
+            Button("Open File") { appState.openFile(file.url) }
+            Button("Copy Path") { appState.copyPathToClipboard(file.path) }
+        }
     }
 
     // MARK: - 3. Exact Duplicates Mode (SHA-256)
 
     private var duplicatesContent: some View {
         let groups = filteredDuplicateGroups()
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
                 TextField("Filter duplicate filenames or paths…", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .controlSize(.small)
-                    .frame(width: 260)
+                    .frame(minWidth: 130, maxWidth: 250)
 
                 HStack(spacing: 4) {
                     Text("SHA-256 Verified")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(SpaceSenseTheme.secondaryAccent)
+                        .lineLimit(1)
                     InfoTooltipIcon("SpaceSense verifies byte-for-byte identity using Apple CryptoKit SHA-256 digests and never matches files by filename alone. At least one copy per group is always preserved.")
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 if appState.isFindingDuplicates {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
                         Text("Hashing (\(appState.duplicateProgress.processed)/\(appState.duplicateProgress.total))…")
                             .font(.caption)
+                            .lineLimit(1)
                         Button("Stop") {
                             appState.cancelDuplicateScan()
                         }
@@ -453,15 +612,16 @@ public struct SmartCleanupView: View {
                         ForEach(groups) { group in
                             Section {
                                 ForEach(group.files) { file in
-                                    HStack(spacing: 12) {
+                                    HStack(spacing: 10) {
                                         Button {
                                             appState.toggleDuplicateSelection(groupID: group.id, fileID: file.id)
                                         } label: {
-                                            HStack(spacing: 6) {
+                                            HStack(spacing: 5) {
                                                 Image(systemName: file.isMarkedForRemoval ? "trash.circle.fill" : "shield.lefthalf.filled")
                                                     .foregroundStyle(file.isMarkedForRemoval ? SpaceSenseTheme.accent : SpaceSenseTheme.secondaryAccent)
-                                                Text(file.isMarkedForRemoval ? "Move to Trash" : "Keep Original")
+                                                Text(file.isMarkedForRemoval ? "Trash Copy" : "Keep Original")
                                                     .font(.caption.weight(.semibold))
+                                                    .lineLimit(1)
                                             }
                                             .padding(.horizontal, 8)
                                             .padding(.vertical, 4)
@@ -471,19 +631,36 @@ public struct SmartCleanupView: View {
                                             )
                                         }
                                         .buttonStyle(.plain)
-                                        .frame(width: 130, alignment: .leading)
+                                        .frame(width: 118, alignment: .leading)
 
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(file.name).font(.subheadline.weight(.medium))
+                                            Text(file.name)
+                                                .font(.subheadline.weight(.medium))
+                                                .lineLimit(1)
                                             Text(file.path)
                                                 .font(.caption2)
                                                 .foregroundStyle(SpaceSenseTheme.slate)
                                                 .lineLimit(1)
                                                 .truncationMode(.middle)
+                                                .help(file.path)
                                         }
-                                        Spacer()
+                                        Spacer(minLength: 4)
                                         Text(ByteFormatting.string(file.size))
                                             .font(.caption.monospacedDigit().weight(.semibold))
+
+                                        Button {
+                                            previewingFile = LargeFileItem(
+                                                url: file.url,
+                                                size: file.size,
+                                                modificationDate: file.modificationDate
+                                            )
+                                        } label: {
+                                            Image(systemName: "eye")
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                        .help("Preview File")
+
                                         Button {
                                             appState.revealInFinder(file.url)
                                         } label: {
@@ -491,20 +668,29 @@ public struct SmartCleanupView: View {
                                         }
                                         .buttonStyle(.bordered)
                                         .controlSize(.small)
+                                        .help("Reveal in Finder")
                                     }
                                     .padding(.vertical, 2)
+                                    .contextMenu {
+                                        Button("Reveal in Finder") { appState.revealInFinder(file.url) }
+                                        Button("Open File") { appState.openFile(file.url) }
+                                        Button("Copy Path") { appState.copyPathToClipboard(file.path) }
+                                    }
                                 }
                             } header: {
                                 HStack {
                                     Text("\(group.files.count) identical copies • \(ByteFormatting.string(group.fileSize)) each")
                                         .font(.caption.weight(.bold))
-                                    Text("SHA-256: \(String(group.sha256Hash.prefix(14)))…")
+                                        .lineLimit(1)
+                                    Text("SHA-256: \(String(group.sha256Hash.prefix(12)))…")
                                         .font(.caption2.monospaced())
                                         .foregroundStyle(SpaceSenseTheme.slate)
-                                    Spacer()
+                                        .lineLimit(1)
+                                    Spacer(minLength: 4)
                                     Text("Reclaimable: \(ByteFormatting.string(group.reclaimableBytes))")
                                         .font(.caption.weight(.semibold))
                                         .foregroundStyle(SpaceSenseTheme.secondaryAccent)
+                                        .lineLimit(1)
                                 }
                             }
                         }
@@ -519,15 +705,16 @@ public struct SmartCleanupView: View {
 
     private func filterPill(title: String, icon: String? = nil, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 if let icon {
                     Image(systemName: icon)
                 }
                 Text(title)
+                    .lineLimit(1)
             }
             .font(.caption.weight(.semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
             .background(
                 Capsule().fill(isSelected ? SpaceSenseTheme.accent : SpaceSenseTheme.slate.opacity(0.12))
             )
@@ -539,7 +726,7 @@ public struct SmartCleanupView: View {
     private func emptyHubState(title: String, detail: String) -> some View {
         VStack(spacing: 10) {
             Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 38))
+                .font(.system(size: 36))
                 .foregroundStyle(SpaceSenseTheme.secondaryAccent)
             Text(title)
                 .font(.headline)
@@ -547,10 +734,10 @@ public struct SmartCleanupView: View {
                 .font(.caption)
                 .foregroundStyle(SpaceSenseTheme.slate)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 440)
+                .frame(maxWidth: 420)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(40)
+        .padding(24)
     }
 
     private func filteredCandidates() -> [CleanupCandidate] {
@@ -567,21 +754,28 @@ public struct SmartCleanupView: View {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let ext = extensionFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: ".", with: "")
 
-        return source
-            .filter { item in
-                guard item.size >= minBytes else { return false }
-                if onlyUnusedLargeFiles && item.daysSinceLastOpened() < appState.unusedFileDaysThreshold {
-                    return false
-                }
-                if !q.isEmpty && !item.name.lowercased().contains(q) && !item.path.lowercased().contains(q) {
-                    return false
-                }
-                if !ext.isEmpty && item.fileExtension != ext {
-                    return false
-                }
-                return true
+        let filtered = source.filter { item in
+            guard item.size >= minBytes else { return false }
+            if onlyUnusedLargeFiles && item.daysSinceLastOpened() < appState.unusedFileDaysThreshold {
+                return false
             }
-            .sorted { $0.size > $1.size }
+            if !q.isEmpty && !item.name.lowercased().contains(q) && !item.path.lowercased().contains(q) {
+                return false
+            }
+            if !ext.isEmpty && item.fileExtension != ext {
+                return false
+            }
+            return true
+        }
+
+        switch largeFileSortOrder {
+        case .sizeDesc:
+            return filtered.sorted { $0.size > $1.size }
+        case .unusedDesc:
+            return filtered.sorted { $0.daysSinceLastOpened() > $1.daysSinceLastOpened() }
+        case .nameAsc:
+            return filtered.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
     }
 
     private func filteredDuplicateGroups() -> [DuplicateGroup] {
@@ -624,7 +818,7 @@ public struct SmartCleanupView: View {
             HStack(spacing: 12) {
                 Image(systemName: "trash.slash.fill")
                     .font(.title)
-                    .foregroundStyle(SpaceSenseTheme.secondaryAccent)
+                    .foregroundStyle(SpaceSenseTheme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Confirm Move to Trash — \(summary.count) Item(s)")
                         .font(.headline)
@@ -647,7 +841,7 @@ public struct SmartCleanupView: View {
                 }
                 .padding(.vertical, 2)
             }
-            .frame(height: 230)
+            .frame(minHeight: 160, idealHeight: 230, maxHeight: 340)
 
             HStack {
                 Spacer()
@@ -662,11 +856,11 @@ public struct SmartCleanupView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(SpaceSenseTheme.secondaryAccent)
+                .tint(SpaceSenseTheme.accent)
             }
         }
         .padding(20)
-        .frame(width: 540)
+        .frame(minWidth: 420, idealWidth: 520, maxWidth: 580)
     }
 }
 
@@ -676,11 +870,11 @@ private struct DeleteHubPreviewModal: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: file.path))
                     .resizable()
-                    .frame(width: 40, height: 40)
+                    .frame(width: 36, height: 36)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(file.name).font(.headline)
                     Text(file.path)
@@ -711,7 +905,7 @@ private struct DeleteHubPreviewModal: View {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
-                    .frame(maxHeight: 260)
+                    .frame(maxHeight: 240)
                     .frame(maxWidth: .infinity)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             } else if ["txt", "md", "json", "log", "swift", "py", "csv", "xml", "yaml", "yml"].contains(file.fileExtension),
@@ -722,7 +916,7 @@ private struct DeleteHubPreviewModal: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
                 }
-                .frame(height: 200)
+                .frame(minHeight: 150, idealHeight: 200, maxHeight: 280)
                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             } else {
                 Text("Inline preview is supported for image and text files. Use 'Open in Default App' or 'Reveal in Finder' below.")
@@ -740,7 +934,7 @@ private struct DeleteHubPreviewModal: View {
             }
         }
         .padding(20)
-        .frame(width: 540)
+        .frame(minWidth: 420, idealWidth: 520, maxWidth: 580)
     }
 
     private static func readSnippet(url: URL) -> String? {

@@ -112,22 +112,30 @@ public struct GeminiService: Sendable {
     public init() {}
 
     /// Automatically detects the AI provider from the key and queries the provider's live `/models` endpoint
-    /// to discover available models for that specific API key.
+    /// to discover available chat models for that specific API key.
     public func autoDetectProviderAndModels(for apiKey: String) async -> (provider: AIProvider, models: [String], recommendedModel: String) {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let provider = AIProvider.detect(from: trimmed)
+        let defaults = provider.defaultModels
         guard !trimmed.isEmpty else {
-            let defaults = provider.defaultModels
             return (provider, defaults, defaults[0])
         }
 
         if let liveModels = await fetchLiveModels(provider: provider, apiKey: trimmed), !liveModels.isEmpty {
-            let preferred = pickRecommendedModel(for: provider, from: liveModels)
-            return (provider, liveModels, preferred)
+            // Merge defaults that exist in liveModels first so recommended models are never truncated out
+            var prioritized: [String] = []
+            for def in defaults where liveModels.contains(def) {
+                prioritized.append(def)
+            }
+            for model in liveModels where !prioritized.contains(model) {
+                prioritized.append(model)
+            }
+            let capped = Array(prioritized.prefix(20))
+            let preferred = pickRecommendedModel(for: provider, from: capped)
+            return (provider, capped, preferred)
         }
 
-        let fallback = provider.defaultModels
-        return (provider, fallback, fallback[0])
+        return (provider, defaults, defaults[0])
     }
 
     private func fetchLiveModels(provider: AIProvider, apiKey: String) async -> [String]? {
@@ -175,26 +183,34 @@ public struct GeminiService: Sendable {
             let names: [String] = modelsArray.compactMap { entry in
                 guard let rawName = entry["name"] as? String else { return nil }
                 let methods = entry["supportedGenerationMethods"] as? [String] ?? []
-                guard methods.isEmpty || methods.contains("generateContent") else { return nil }
+                guard methods.contains("generateContent") else { return nil }
                 let shortName = rawName.replacingOccurrences(of: "models/", with: "")
-                guard shortName.hasPrefix("gemini-") && !shortName.contains("embedding") && !shortName.contains("imagen") else {
+                guard shortName.hasPrefix("gemini-") &&
+                      !shortName.contains("embedding") &&
+                      !shortName.contains("imagen") &&
+                      !shortName.contains("aqa") else {
                     return nil
                 }
                 return shortName
             }
-            return names.isEmpty ? nil : Array(names.prefix(15))
+            return names.isEmpty ? nil : names
         }
 
         if let dataArray = json["data"] as? [[String: Any]] {
+            let excludedSubstrings = [
+                "embed", "whisper", "tts", "dall-e", "moderation",
+                "instruct", "realtime", "audio", "davinci", "babbage",
+                "transcribe", "image", "computer-use", "search"
+            ]
             let ids: [String] = dataArray.compactMap { entry in
                 guard let id = entry["id"] as? String else { return nil }
                 let lower = id.lowercased()
-                if lower.contains("embed") || lower.contains("whisper") || lower.contains("tts") || lower.contains("dall-e") || lower.contains("moderation") {
+                if excludedSubstrings.contains(where: { lower.contains($0) }) {
                     return nil
                 }
                 return id
             }
-            return ids.isEmpty ? nil : Array(ids.prefix(20))
+            return ids.isEmpty ? nil : ids
         }
 
         return nil
@@ -205,8 +221,10 @@ public struct GeminiService: Sendable {
             if let exact = available.first(where: { $0 == preferred }) {
                 return exact
             }
-            if let partial = available.first(where: { $0.contains(preferred) }) {
-                return partial
+        }
+        for preferred in provider.defaultModels {
+            if let prefixMatch = available.first(where: { $0.hasPrefix(preferred) }) {
+                return prefixMatch
             }
         }
         return available.first ?? provider.defaultModels[0]
@@ -224,7 +242,7 @@ public struct GeminiService: Sendable {
     ) -> String {
         var lines: [String] = []
         lines.append("=== ACTUAL MAC STORAGE TELEMETRY (MEASURED BY SPACESENSE) ===")
-        lines.append("Volume: \(volumeStats.volumeName) (\(volumeStats.mountPoint))")
+        lines.append("Volume: \(volumeStats.volumeName)")
         lines.append("Total Capacity: \(ByteFormatting.string(volumeStats.totalBytes))")
         lines.append("Used Storage: \(ByteFormatting.string(volumeStats.usedBytes)) (\(String(format: "%.1f%%", volumeStats.utilizationPercentage)))")
         lines.append("Available Storage: \(ByteFormatting.string(volumeStats.availableBytes))")
@@ -275,7 +293,8 @@ public struct GeminiService: Sendable {
         let totalCleanupBytes = cleanupCandidates.reduce(0) { $0 + $1.sizeBytes }
         lines.append("Delete Hub Candidates: \(cleanupCandidates.count) items totaling \(ByteFormatting.string(totalCleanupBytes))")
         for candidate in cleanupCandidates.prefix(10) {
-            lines.append("- [\(candidate.kind.rawValue)] \(candidate.title): \(ByteFormatting.string(candidate.sizeBytes)) (\(candidate.risk.rawValue))")
+            let safePath = formatPath(candidate.locationURL.path, shareFullPaths: shareFullPaths)
+            lines.append("- [\(candidate.kind.rawValue)] \(safePath): \(ByteFormatting.string(candidate.sizeBytes)) (\(candidate.risk.rawValue))")
         }
 
         if !growthDeltas.isEmpty {
@@ -318,12 +337,14 @@ public struct GeminiService: Sendable {
         \(contextSummary)
         """
 
+        let sanitizedHistory = normalizeAlternatingHistory(from: conversationHistory)
+
         switch activeProvider {
         case .gemini:
             return try await callGeminiAPI(
                 question: question,
                 systemInstruction: systemInstruction,
-                conversationHistory: conversationHistory,
+                conversationHistory: sanitizedHistory,
                 apiKey: trimmedKey,
                 model: model
             )
@@ -331,7 +352,7 @@ public struct GeminiService: Sendable {
             return try await callAnthropicAPI(
                 question: question,
                 systemInstruction: systemInstruction,
-                conversationHistory: conversationHistory,
+                conversationHistory: sanitizedHistory,
                 apiKey: trimmedKey,
                 model: model
             )
@@ -340,11 +361,29 @@ public struct GeminiService: Sendable {
                 provider: activeProvider,
                 question: question,
                 systemInstruction: systemInstruction,
-                conversationHistory: conversationHistory,
+                conversationHistory: sanitizedHistory,
                 apiKey: trimmedKey,
                 model: model
             )
         }
+    }
+
+    /// Ensures conversation history starts with `.user`, ends with `.assistant`, and strictly alternates roles.
+    private func normalizeAlternatingHistory(from history: [AIMessage]) -> [AIMessage] {
+        let nonError = history.suffix(8).filter { !$0.isError }
+        let userStarted = nonError.drop(while: { $0.role != .user })
+        var result: [AIMessage] = []
+        for msg in userStarted {
+            if let last = result.last, last.role == msg.role {
+                result[result.count - 1] = msg
+            } else {
+                result.append(msg)
+            }
+        }
+        if result.last?.role == .user {
+            result.removeLast()
+        }
+        return result
     }
 
     private func callGeminiAPI(
@@ -362,9 +401,7 @@ public struct GeminiService: Sendable {
         }
 
         var contentsArray: [[String: Any]] = []
-        let validHistory = conversationHistory.suffix(6).filter { !$0.isError }
-        let userStartedHistory = validHistory.drop(while: { $0.role != .user })
-        for msg in userStartedHistory {
+        for msg in conversationHistory {
             let role = msg.role == .user ? "user" : "model"
             contentsArray.append([
                 "role": role,
@@ -394,7 +431,7 @@ public struct GeminiService: Sendable {
         request.timeoutInterval = 30
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
-        let (data, httpResponse) = try await performRequest(request)
+        let (data, _) = try await performRequest(request)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let candidates = json["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first,
@@ -404,7 +441,6 @@ public struct GeminiService: Sendable {
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw GeminiError.emptyResponse
         }
-        _ = httpResponse
         return text
     }
 
@@ -420,8 +456,7 @@ public struct GeminiService: Sendable {
         }
 
         var messages: [[String: String]] = []
-        let validHistory = conversationHistory.suffix(6).filter { !$0.isError }
-        for msg in validHistory.drop(while: { $0.role != .user }) {
+        for msg in conversationHistory {
             messages.append([
                 "role": msg.role == .user ? "user" : "assistant",
                 "content": msg.content
@@ -481,7 +516,7 @@ public struct GeminiService: Sendable {
         var messages: [[String: String]] = [
             ["role": "system", "content": systemInstruction]
         ]
-        for msg in conversationHistory.suffix(6).filter({ !$0.isError }) {
+        for msg in conversationHistory {
             messages.append([
                 "role": msg.role == .user ? "user" : "assistant",
                 "content": msg.content
@@ -489,11 +524,16 @@ public struct GeminiService: Sendable {
         }
         messages.append(["role": "user", "content": question])
 
-        let requestBody: [String: Any] = [
+        let lowerModel = model.lowercased()
+        let isReasoningModel = lowerModel.hasPrefix("o1") || lowerModel.hasPrefix("o3") || lowerModel.hasPrefix("o4")
+
+        var requestBody: [String: Any] = [
             "model": model,
-            "messages": messages,
-            "temperature": 0.2
+            "messages": messages
         ]
+        if !isReasoningModel {
+            requestBody["temperature"] = 0.2
+        }
 
         var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
