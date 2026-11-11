@@ -1,0 +1,18 @@
+# Xcode / SwiftPM build artifacts
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+
+# Packaged macOS app bundle
+build/
+SpaceSense.app/
+
+# macOS system files
+.DS_Store
+
+# Local secrets / environment files
+.env
+*.key
+*.pem

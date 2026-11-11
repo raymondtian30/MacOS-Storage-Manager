@@ -1,0 +1,392 @@
+import Foundation
+import SwiftUI
+
+public enum NavigationSection: String, CaseIterable, Identifiable, Sendable {
+    case overview = "Overview"
+    case analyzer = "Storage Analyzer"
+    case largeFiles = "Large Files"
+    case duplicates = "Duplicate Finder"
+    case systemData = "System Data"
+    case smartCleanup = "Smart Cleanup"
+    case history = "Storage History"
+    case aiAssistant = "AI Assistant"
+    case settings = "Settings"
+
+    public var id: String { rawValue }
+
+    public var icon: String {
+        switch self {
+        case .overview: return "gauge.with.dots.needle.bottom.50percent"
+        case .analyzer: return "square.grid.3x2.fill"
+        case .largeFiles: return "arrow.up.doc.fill"
+        case .duplicates: return "doc.on.doc.fill"
+        case .systemData: return "externaldrive.fill.badge.timemachine"
+        case .smartCleanup: return "sparkles"
+        case .history: return "chart.xyaxis.line"
+        case .aiAssistant: return "brain.head.profile"
+        case .settings: return "gearshape.fill"
+        }
+    }
+
+    public var subtitle: String {
+        switch self {
+        case .overview: return "Disk health, category breakdown, and recent activity"
+        case .analyzer: return "Interactive treemap and hierarchical folder browser"
+        case .largeFiles: return "Find, filter, preview, and manage the largest files"
+        case .duplicates: return "Locate exact duplicate files using SHA-256 hashing"
+        case .systemData: return "Inspect caches, logs, developer artifacts, and system folders"
+        case .smartCleanup: return "Safe, reviewable recommendations to reclaim space"
+        case .history: return "Track storage utilization and growing folders over time"
+        case .aiAssistant: return "Ask Gemini questions grounded in your actual scan data"
+        case .settings: return "Configure API keys, scan exclusions, and privacy options"
+        }
+    }
+}
+
+public enum StorageCategory: String, CaseIterable, Codable, Identifiable, Sendable {
+    case applications = "Applications"
+    case documents = "Documents"
+    case downloads = "Downloads"
+    case photosAndMedia = "Photos & Media"
+    case developer = "Developer Files"
+    case systemData = "System Data"
+    case other = "Other"
+
+    public var id: String { rawValue }
+
+    public var icon: String {
+        switch self {
+        case .applications: return "app.badge.fill"
+        case .documents: return "doc.text.fill"
+        case .downloads: return "arrow.down.circle.fill"
+        case .photosAndMedia: return "photo.stack.fill"
+        case .developer: return "hammer.fill"
+        case .systemData: return "internaldrive.fill"
+        case .other: return "folder.fill"
+        }
+    }
+
+    public var color: Color {
+        switch self {
+        case .applications: return Color(red: 0.25, green: 0.56, blue: 0.98)
+        case .documents: return Color(red: 0.35, green: 0.78, blue: 0.62)
+        case .downloads: return Color(red: 0.64, green: 0.44, blue: 0.97)
+        case .photosAndMedia: return Color(red: 0.96, green: 0.45, blue: 0.58)
+        case .developer: return Color(red: 0.97, green: 0.65, blue: 0.22)
+        case .systemData: return Color(red: 0.52, green: 0.58, blue: 0.68)
+        case .other: return Color(red: 0.38, green: 0.72, blue: 0.88)
+        }
+    }
+
+    public static func classify(url: URL, isDirectory: Bool = false) -> StorageCategory {
+        let path = url.path
+        let lowerPath = path.lowercased()
+        let ext = url.pathExtension.lowercased()
+
+        if lowerPath.contains("/applications/") || ext == "app" {
+            return .applications
+        }
+        if lowerPath.contains("/downloads/") || lowerPath.hasSuffix("/downloads") {
+            return .downloads
+        }
+        if lowerPath.contains("/developer/") ||
+            lowerPath.contains("/deriveddata/") ||
+            lowerPath.contains("/coresimulator/") ||
+            lowerPath.contains("/node_modules/") ||
+            lowerPath.contains("/.git/") ||
+            lowerPath.contains("/.cargo/") ||
+            lowerPath.contains("/.gradle/") ||
+            ["swift", "xcodeproj", "xcworkspace", "py", "js", "ts", "tsx", "rs", "go", "c", "cpp", "h", "java", "kt", "o", "dylib", "a"].contains(ext) {
+            return .developer
+        }
+        if lowerPath.contains("/library/") ||
+            lowerPath.hasPrefix("/system/") ||
+            lowerPath.hasPrefix("/private/") ||
+            lowerPath.hasPrefix("/var/") ||
+            lowerPath.hasPrefix("/usr/") {
+            return .systemData
+        }
+        if lowerPath.contains("/pictures/") ||
+            lowerPath.contains("/movies/") ||
+            lowerPath.contains("/music/") ||
+            ["jpg", "jpeg", "png", "heic", "gif", "webp", "tiff", "raw", "cr2", "dng", "mp4", "mov", "mkv", "avi", "mp3", "wav", "aac", "flac", "m4a"].contains(ext) {
+            return .photosAndMedia
+        }
+        if lowerPath.contains("/documents/") ||
+            lowerPath.contains("/desktop/") ||
+            ["pdf", "doc", "docx", "txt", "rtf", "md", "pages", "numbers", "key", "xls", "xlsx", "ppt", "pptx", "csv", "epub"].contains(ext) {
+            return .documents
+        }
+        return .other
+    }
+}
+
+public struct VolumeStats: Codable, Equatable, Sendable {
+    public let volumeName: String
+    public let mountPoint: String
+    public let totalBytes: Int64
+    public let availableBytes: Int64
+    public let usedBytes: Int64
+    public let isReadOnly: Bool
+
+    public init(
+        volumeName: String,
+        mountPoint: String,
+        totalBytes: Int64,
+        availableBytes: Int64,
+        usedBytes: Int64,
+        isReadOnly: Bool = false
+    ) {
+        self.volumeName = volumeName
+        self.mountPoint = mountPoint
+        self.totalBytes = max(totalBytes, 1)
+        self.availableBytes = max(availableBytes, 0)
+        self.usedBytes = max(usedBytes, 0)
+        self.isReadOnly = isReadOnly
+    }
+
+    public var utilizationPercentage: Double {
+        guard totalBytes > 0 else { return 0 }
+        return min(100.0, max(0.0, (Double(usedBytes) / Double(totalBytes)) * 100.0))
+    }
+
+    public static func currentBootVolume() -> VolumeStats {
+        let rootURL = URL(fileURLWithPath: "/")
+        let keys: Set<URLResourceKey> = [
+            .volumeNameKey,
+            .volumeTotalCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey,
+            .volumeIsReadOnlyKey
+        ]
+        if let values = try? rootURL.resourceValues(forKeys: keys) {
+            let name = values.volumeName ?? "Macintosh HD"
+            let total = Int64(values.volumeTotalCapacity ?? 0)
+            let availableImportant = values.volumeAvailableCapacityForImportantUsage ?? 0
+            let availableStandard = Int64(values.volumeAvailableCapacity ?? 0)
+            let available = availableImportant > 0 ? availableImportant : availableStandard
+            let used = max(0, total - available)
+            let readOnly = values.volumeIsReadOnly ?? false
+            return VolumeStats(
+                volumeName: name,
+                mountPoint: "/",
+                totalBytes: total,
+                availableBytes: available,
+                usedBytes: used,
+                isReadOnly: readOnly
+            )
+        }
+        return VolumeStats(
+            volumeName: "Macintosh HD",
+            mountPoint: "/",
+            totalBytes: 500_000_000_000,
+            availableBytes: 100_000_000_000,
+            usedBytes: 400_000_000_000
+        )
+    }
+}
+
+public struct FileNode: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let url: URL
+    public let name: String
+    public let isDirectory: Bool
+    public let size: Int64
+    public let modificationDate: Date?
+    public let fileExtension: String
+    public let category: StorageCategory
+    public let itemCount: Int
+    public let isAccessible: Bool
+    public var children: [FileNode]
+
+    public init(
+        url: URL,
+        name: String? = nil,
+        isDirectory: Bool,
+        size: Int64,
+        modificationDate: Date? = nil,
+        fileExtension: String? = nil,
+        category: StorageCategory? = nil,
+        itemCount: Int = 1,
+        isAccessible: Bool = true,
+        children: [FileNode] = []
+    ) {
+        self.id = url.path
+        self.url = url
+        self.name = name ?? (url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent)
+        self.isDirectory = isDirectory
+        self.size = size
+        self.modificationDate = modificationDate
+        self.fileExtension = fileExtension ?? url.pathExtension.lowercased()
+        self.category = category ?? StorageCategory.classify(url: url, isDirectory: isDirectory)
+        self.itemCount = itemCount
+        self.isAccessible = isAccessible
+        self.children = children
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
+    public static func == (lhs: FileNode, rhs: FileNode) -> Bool {
+        lhs.id == rhs.id && lhs.size == rhs.size
+    }
+}
+
+public struct LargeFileItem: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let url: URL
+    public let name: String
+    public let path: String
+    public let size: Int64
+    public let modificationDate: Date?
+    public let fileExtension: String
+    public let category: StorageCategory
+
+    public init(
+        url: URL,
+        size: Int64,
+        modificationDate: Date?,
+        category: StorageCategory? = nil
+    ) {
+        self.id = url.path
+        self.url = url
+        self.name = url.lastPathComponent
+        self.path = url.path
+        self.size = size
+        self.modificationDate = modificationDate
+        self.fileExtension = url.pathExtension.lowercased()
+        self.category = category ?? StorageCategory.classify(url: url, isDirectory: false)
+    }
+}
+
+public struct DuplicateFileItem: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let url: URL
+    public let name: String
+    public let path: String
+    public let size: Int64
+    public let modificationDate: Date?
+    public var isMarkedForRemoval: Bool
+
+    public init(
+        url: URL,
+        size: Int64,
+        modificationDate: Date?,
+        isMarkedForRemoval: Bool = false
+    ) {
+        self.id = url.path
+        self.url = url
+        self.name = url.lastPathComponent
+        self.path = url.path
+        self.size = size
+        self.modificationDate = modificationDate
+        self.isMarkedForRemoval = isMarkedForRemoval
+    }
+}
+
+public struct DuplicateGroup: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let sha256Hash: String
+    public let fileSize: Int64
+    public var files: [DuplicateFileItem]
+
+    public init(sha256Hash: String, fileSize: Int64, files: [DuplicateFileItem]) {
+        self.id = sha256Hash
+        self.sha256Hash = sha256Hash
+        self.fileSize = fileSize
+        self.files = files
+    }
+
+    public var reclaimableBytes: Int64 {
+        guard files.count > 1 else { return 0 }
+        return fileSize * Int64(files.count - 1)
+    }
+
+    public var selectedReclaimableBytes: Int64 {
+        let selectedCount = files.filter(\.isMarkedForRemoval).count
+        return fileSize * Int64(selectedCount)
+    }
+}
+
+public struct ScanProgress: Sendable {
+    public var filesScanned: Int
+    public var directoriesScanned: Int
+    public var bytesScanned: Int64
+    public var currentPath: String
+    public var permissionErrors: Int
+
+    public init(
+        filesScanned: Int = 0,
+        directoriesScanned: Int = 0,
+        bytesScanned: Int64 = 0,
+        currentPath: String = "",
+        permissionErrors: Int = 0
+    ) {
+        self.filesScanned = filesScanned
+        self.directoriesScanned = directoriesScanned
+        self.bytesScanned = bytesScanned
+        self.currentPath = currentPath
+        self.permissionErrors = permissionErrors
+    }
+}
+
+public struct ScanResult: Sendable {
+    public let id: UUID
+    public let timestamp: Date
+    public let rootURL: URL
+    public let durationSeconds: TimeInterval
+    public let rootNode: FileNode
+    public let categoryBytes: [StorageCategory: Int64]
+    public let largeFiles: [LargeFileItem]
+    public let allFiles: [LargeFileItem]
+    public let totalFilesScanned: Int
+    public let totalDirectoriesScanned: Int
+    public let permissionErrorCount: Int
+    public let volumeStats: VolumeStats
+
+    public init(
+        id: UUID = UUID(),
+        timestamp: Date = Date(),
+        rootURL: URL,
+        durationSeconds: TimeInterval,
+        rootNode: FileNode,
+        categoryBytes: [StorageCategory: Int64],
+        largeFiles: [LargeFileItem],
+        allFiles: [LargeFileItem],
+        totalFilesScanned: Int,
+        totalDirectoriesScanned: Int,
+        permissionErrorCount: Int,
+        volumeStats: VolumeStats
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.rootURL = rootURL
+        self.durationSeconds = durationSeconds
+        self.rootNode = rootNode
+        self.categoryBytes = categoryBytes
+        self.largeFiles = largeFiles
+        self.allFiles = allFiles
+        self.totalFilesScanned = totalFilesScanned
+        self.totalDirectoriesScanned = totalDirectoriesScanned
+        self.permissionErrorCount = permissionErrorCount
+        self.volumeStats = volumeStats
+    }
+}
+
+public enum ByteFormatting {
+    public static func string(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB, .useTB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+
+    public static func compactString(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB, .useTB]
+        formatter.countStyle = .file
+        formatter.includesUnit = true
+        return formatter.string(fromByteCount: bytes)
+    }
+}
