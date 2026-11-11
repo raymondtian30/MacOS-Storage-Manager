@@ -165,14 +165,17 @@ public struct GeminiService: Sendable {
         \(contextSummary)
         """
 
+        let encodedModel = model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "gemini-2.5-flash"
         guard let endpointURL = URL(
-            string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(trimmedKey)"
+            string: "https://generativelanguage.googleapis.com/v1beta/models/\(encodedModel):generateContent"
         ) else {
             throw GeminiError.invalidAPIKey
         }
 
         var contentsArray: [[String: Any]] = []
-        for msg in conversationHistory.suffix(6) where !msg.isError {
+        let validHistory = conversationHistory.suffix(6).filter { !$0.isError }
+        let userStartedHistory = validHistory.drop(while: { $0.role != .user })
+        for msg in userStartedHistory {
             let role = msg.role == .user ? "user" : "model"
             contentsArray.append([
                 "role": role,
@@ -198,6 +201,7 @@ public struct GeminiService: Sendable {
         var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 30
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
@@ -216,12 +220,15 @@ public struct GeminiService: Sendable {
         switch httpResponse.statusCode {
         case 200...299:
             break
-        case 400, 401, 403:
+        case 401, 403:
             throw GeminiError.invalidAPIKey
         case 429:
             throw GeminiError.rateLimited
         default:
             let bodyText = String(data: data, encoding: .utf8) ?? "Unknown error"
+            if httpResponse.statusCode == 400 && bodyText.contains("API_KEY_INVALID") {
+                throw GeminiError.invalidAPIKey
+            }
             throw GeminiError.serverError(httpResponse.statusCode, String(bodyText.prefix(200)))
         }
 
@@ -238,20 +245,23 @@ public struct GeminiService: Sendable {
         return text
     }
 
-    private func formatPath(_ path: String, shareFullPaths: Bool) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+    public func formatPath(_ path: String, shareFullPaths: Bool) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
         var normalized = path
-        if normalized.hasPrefix(home) {
+        if normalized == home {
+            normalized = "~"
+        } else if normalized.hasPrefix(home + "/") {
             normalized = "~" + normalized.dropFirst(home.count)
         }
         if shareFullPaths {
             return normalized
         }
-        // Redact intermediate user-specific folder names if privacy mode is strict
-        let components = normalized.split(separator: "/")
-        if components.count <= 3 {
-            return normalized
+        // Redact intermediate user-specific folder names when privacy mode is strict
+        let components = normalized.split(separator: "/", omittingEmptySubsequences: true)
+        guard let last = components.last else { return normalized }
+        if normalized.hasPrefix("~/") {
+            return "~/.../\(last)"
         }
-        return ".../" + components.suffix(2).joined(separator: "/")
+        return "/.../\(last)"
     }
 }

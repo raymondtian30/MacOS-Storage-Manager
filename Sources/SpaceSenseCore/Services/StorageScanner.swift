@@ -100,8 +100,14 @@ public actor StorageScanner {
             .fileAllocatedSizeKey,
             .totalFileAllocatedSizeKey,
             .fileSizeKey,
-            .contentModificationDateKey
+            .contentModificationDateKey,
+            .fileResourceIdentifierKey
         ]
+
+        var seenResourceIDs: Set<Data> = []
+        let normalizedExclusions = Set(
+            configuration.excludedPaths.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        )
 
         var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
         if !configuration.includeHiddenFiles {
@@ -132,7 +138,7 @@ public actor StorageScanner {
             let itemURL = item.standardizedFileURL
             let itemPath = itemURL.path
 
-            if shouldExclude(path: itemPath, rootPath: rootPath, excludedPaths: configuration.excludedPaths) {
+            if shouldExclude(path: itemPath, rootPath: rootPath, excludedPaths: normalizedExclusions) {
                 enumerator.skipDescendants()
                 continue
             }
@@ -174,10 +180,21 @@ public actor StorageScanner {
                 }
             } else {
                 // Regular file or bundle/package (.app, .photoslibrary, etc.)
+                let resourceID = (values.fileResourceIdentifier as? NSData).map { Data(referencing: $0) }
+                if !isPackage, let resourceID {
+                    if !seenResourceIDs.insert(resourceID).inserted {
+                        // Hard link to an already-counted inode in this scan
+                        continue
+                    }
+                }
+
                 let fileSize: Int64
+                let logicalSize: Int64
                 if isPackage {
                     fileSize = calculatePackageSize(at: itemURL, modificationDate: modDate)
+                    logicalSize = fileSize
                 } else {
+                    logicalSize = Int64(values.fileSize ?? 0)
                     fileSize = Int64(
                         values.totalFileAllocatedSize
                         ?? values.fileAllocatedSize
@@ -195,15 +212,17 @@ public actor StorageScanner {
                 let fileRecord = LargeFileItem(
                     url: itemURL,
                     size: fileSize,
+                    logicalSize: logicalSize,
                     modificationDate: modDate,
-                    category: category
+                    category: category,
+                    resourceIdentifier: resourceID
                 )
 
                 if fileSize >= configuration.minimumLargeFileBytes {
                     largeFiles.append(fileRecord)
                 }
-                // Keep files >= 4 KB or when scanning small directories for duplicate/cleanup candidates
-                if fileSize > 0 && (allFiles.count < 25_000 || fileSize >= 1024 * 1024) {
+                // Keep regular files (excluding package directories) for duplicate/cleanup candidates
+                if !isPackage && logicalSize > 0 && (logicalSize >= 4096 || allFiles.count < 5_000) && allFiles.count < 100_000 {
                     allFiles.append(fileRecord)
                 }
 
@@ -219,7 +238,7 @@ public actor StorageScanner {
                     cursorURL = cursorURL.deletingLastPathComponent().standardizedFileURL
                 }
 
-                // Attach direct file node if within maxTreeDepth and either reasonably sized or top files in folder
+                // Attach direct file node if within maxTreeDepth, capping in-memory array per folder
                 let parentPath = itemURL.deletingLastPathComponent().standardizedFileURL.path
                 let depth = itemURL.pathComponents.count - rootComponentsCount
                 if depth <= configuration.maxTreeDepth {
@@ -230,7 +249,15 @@ public actor StorageScanner {
                         modificationDate: modDate,
                         category: category
                     )
-                    parentToDirectFiles[parentPath, default: []].append(fileNode)
+                    var list = parentToDirectFiles[parentPath] ?? []
+                    if list.count < 120 {
+                        list.append(fileNode)
+                        parentToDirectFiles[parentPath] = list
+                    } else if let minIdx = list.enumerated().min(by: { $0.element.size < $1.element.size })?.offset,
+                              fileSize > list[minIdx].size {
+                        list[minIdx] = fileNode
+                        parentToDirectFiles[parentPath] = list
+                    }
                 }
             }
 
@@ -272,7 +299,7 @@ public actor StorageScanner {
         }
 
         let duration = Date().timeIntervalSince(startTime)
-        let volumeStats = VolumeStats.currentBootVolume()
+        let volumeStats = VolumeStats.forURL(standardizedRoot)
 
         return ScanResult(
             timestamp: Date(),
@@ -293,8 +320,7 @@ public actor StorageScanner {
         if path == rootPath { return false }
         for excluded in excludedPaths {
             if path == excluded || path.hasPrefix(excluded + "/") {
-                // Only exclude if rootPath itself is not inside the excluded path
-                if !rootPath.hasPrefix(excluded) {
+                if rootPath != excluded && !rootPath.hasPrefix(excluded + "/") {
                     return true
                 }
             }
@@ -316,7 +342,12 @@ public actor StorageScanner {
             return 0
         }
         var total: Int64 = 0
+        var count = 0
         while let fileURL = enumerator.nextObject() as? URL {
+            count += 1
+            if count % 250 == 0 && Task.isCancelled {
+                return total
+            }
             guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
                   values.isSymbolicLink != true else {
                 continue

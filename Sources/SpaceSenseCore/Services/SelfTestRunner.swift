@@ -183,6 +183,9 @@ public enum SelfTestRunner {
 
         try expect(SmartCleanupEngine.isProtectedSystemPath("/System/Library"), "Expected /System/Library to be protected")
         try expect(SmartCleanupEngine.isProtectedSystemPath("/usr/bin"), "Expected /usr/bin to be protected")
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        try expect(SmartCleanupEngine.isProtectedSystemPath(home), "Expected user home directory to be protected")
+        try expect(SmartCleanupEngine.isProtectedSystemPath("\(home)/Library"), "Expected ~/Library root to be protected")
         try expect(!SmartCleanupEngine.isProtectedSystemPath(tempRoot.path), "Expected temp dir to be non-protected")
 
         let downloads = tempRoot.appendingPathComponent("Downloads", isDirectory: true)
@@ -264,6 +267,10 @@ public enum SelfTestRunner {
         try expect(keychain.loadAPIKey() == nil, "Expected keychain to be nil after deletion")
 
         let gemini = GeminiService()
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let redacted = gemini.formatPath("\(home)/Desktop/SecretProject/report.pdf", shareFullPaths: false)
+        try expect(!redacted.contains("SecretProject"), "Expected intermediate folder name to be redacted when shareFullPaths is false")
+
         let summary = gemini.buildStorageContextSummary(
             volumeStats: VolumeStats.currentBootVolume(),
             scanResult: nil,

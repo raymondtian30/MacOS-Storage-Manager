@@ -12,7 +12,6 @@ public struct StorageAnalyzerView: View {
     }
 
     @State private var sortOrder: SortOrder = .sizeDesc
-    @State private var selectedCategoryFilter: StorageCategory?
     @State private var fileTypeFilter: String = ""
     @State private var searchText: String = ""
     @State private var hoveredNodeID: String?
@@ -125,7 +124,7 @@ public struct StorageAnalyzerView: View {
                 Button {
                     appState.revealInFinder(currentNode.url)
                 } label: {
-                    Label("Reveal", systemImage: "finder")
+                    Label("Reveal", systemImage: "folder")
                         .font(.caption)
                 }
                 .buttonStyle(.bordered)
@@ -190,7 +189,7 @@ public struct StorageAnalyzerView: View {
                         .controlSize(.small)
                         .frame(width: 95)
 
-                    Picker("Category", selection: $selectedCategoryFilter) {
+                    Picker("Category", selection: $appState.analyzerCategoryFilter) {
                         Text("All Categories").tag(StorageCategory?.none)
                         ForEach(StorageCategory.allCases) { cat in
                             Text(cat.rawValue).tag(StorageCategory?.some(cat))
@@ -320,10 +319,10 @@ public struct StorageAnalyzerView: View {
         let trimmedExt = fileTypeFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: ".", with: "")
 
         let filtered = node.children.filter { child in
-            if let cat = selectedCategoryFilter, child.category != cat {
+            if let cat = appState.analyzerCategoryFilter, child.category != cat && !child.isDirectory {
                 return false
             }
-            if !trimmedExt.isEmpty && child.fileExtension.lowercased() != trimmedExt {
+            if !trimmedExt.isEmpty && !child.isDirectory && child.fileExtension.lowercased() != trimmedExt {
                 return false
             }
             if !trimmedSearch.isEmpty {
@@ -408,7 +407,11 @@ public struct SquarifiedTreemapView: View {
                     .frame(width: max(0, entry.rect.width - 3), height: max(0, entry.rect.height - 3))
                     .position(x: entry.rect.midX, y: entry.rect.midY)
                     .onHover { hovering in
-                        hoveredID = hovering ? entry.node.id : nil
+                        if hovering {
+                            hoveredID = entry.node.id
+                        } else if hoveredID == entry.node.id {
+                            hoveredID = nil
+                        }
                     }
                     .help("\(entry.node.name) — \(ByteFormatting.string(entry.node.size)) (\(entry.node.category.rawValue))")
                 }
@@ -453,13 +456,13 @@ public struct SquarifiedTreemapView: View {
         let ratio = CGFloat(Double(leftSum) / Double(total))
 
         if horizontal {
-            let leftWidth = max(8, rect.width * ratio)
+            let leftWidth = min(rect.width, max(4, rect.width * ratio))
             let r1 = CGRect(x: rect.minX, y: rect.minY, width: leftWidth, height: rect.height)
             let r2 = CGRect(x: rect.minX + leftWidth, y: rect.minY, width: max(0, rect.width - leftWidth), height: rect.height)
             return sliceAndDice(leftNodes, in: r1, horizontal: !horizontal)
                 + sliceAndDice(rightNodes, in: r2, horizontal: !horizontal)
         } else {
-            let topHeight = max(8, rect.height * ratio)
+            let topHeight = min(rect.height, max(4, rect.height * ratio))
             let r1 = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: topHeight)
             let r2 = CGRect(x: rect.minX, y: rect.minY + topHeight, width: rect.width, height: max(0, rect.height - topHeight))
             return sliceAndDice(leftNodes, in: r1, horizontal: !horizontal)

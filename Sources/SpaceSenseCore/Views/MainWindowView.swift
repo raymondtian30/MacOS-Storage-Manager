@@ -31,6 +31,14 @@ public struct MainWindowView: View {
                     }
                 }
 
+                if appState.isScanning && appState.selectedSection != .overview && appState.selectedSection != .analyzer {
+                    ScanProgressBanner(progress: appState.scanProgress) {
+                        appState.cancelScan()
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 12)
+                }
+
                 detailView
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

@@ -32,6 +32,9 @@ public final class HistoryStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if sqlite3_open(databasePath, &db) != SQLITE_OK {
+            if let db {
+                sqlite3_close(db)
+            }
             db = nil
         }
     }
@@ -128,7 +131,7 @@ public final class HistoryStore: @unchecked Sendable {
         SELECT id, timestamp, scanned_path, total_capacity_bytes, used_bytes, available_bytes,
                scanned_root_bytes, category_json, folders_json
         FROM scan_snapshots
-        ORDER BY timestamp ASC
+        ORDER BY timestamp DESC
         LIMIT ?;
         """
         lock.lock()
@@ -173,13 +176,13 @@ public final class HistoryStore: @unchecked Sendable {
                 )
             )
         }
-        return snapshots
+        return snapshots.reversed()
     }
 
     public func computeGrowthDeltas(snapshots: [ScanHistorySnapshot]) -> [StorageGrowthDelta] {
         guard snapshots.count >= 2,
               let latest = snapshots.last,
-              let previous = snapshots.dropLast().last(where: { $0.scannedPath == latest.scannedPath }) ?? snapshots.dropLast().last else {
+              let previous = snapshots.dropLast().last(where: { $0.scannedPath == latest.scannedPath }) else {
             return []
         }
 
@@ -200,7 +203,8 @@ public final class HistoryStore: @unchecked Sendable {
         }
 
         for (folderPath, currentBytes) in latest.topFolders {
-            if let prevBytes = previous.topFolders[folderPath], currentBytes != prevBytes {
+            let prevBytes = previous.topFolders[folderPath] ?? 0
+            if currentBytes != prevBytes {
                 deltas.append(
                     StorageGrowthDelta(
                         name: folderPath,

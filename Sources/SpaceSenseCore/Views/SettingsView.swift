@@ -179,8 +179,11 @@ public struct SettingsView: View {
                         .controlSize(.small)
                     Button("Add Exclusion") {
                         let trimmed = newExclusionPath.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty, !appState.scanExclusions.contains(trimmed) else { return }
-                        appState.scanExclusions.append(trimmed)
+                        guard !trimmed.isEmpty else { return }
+                        let expanded = (trimmed as NSString).expandingTildeInPath
+                        let normalized = URL(fileURLWithPath: expanded).standardizedFileURL.path
+                        guard !appState.scanExclusions.contains(normalized) else { return }
+                        appState.scanExclusions.append(normalized)
                         newExclusionPath = ""
                     }
                     .buttonStyle(.bordered)

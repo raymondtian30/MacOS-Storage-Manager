@@ -234,12 +234,15 @@ public struct LargeFilesView: View {
     }
 
     private func computeFilteredFiles() -> [LargeFileItem] {
-        guard let source = appState.latestScanResult?.largeFiles else { return [] }
+        guard let scan = appState.latestScanResult else { return [] }
+        let thresholdBytes = Int64(appState.largeFileThresholdMB * 1024 * 1024)
+        let rawSource = scan.allFiles.isEmpty ? scan.largeFiles : scan.allFiles
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let ext = extensionFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: ".", with: "")
         let now = Date()
 
-        let filtered = source.filter { item in
+        let filtered = rawSource.filter { item in
+            guard item.size >= thresholdBytes else { return false }
             guard FileManager.default.fileExists(atPath: item.path) else { return false }
             if !q.isEmpty && !item.name.lowercased().contains(q) && !item.path.lowercased().contains(q) {
                 return false
@@ -315,17 +318,16 @@ private struct FilePreviewModal: View {
             }
             .font(.subheadline)
 
-            if let image = NSImage(contentsOf: file.url) {
+            if ["jpg", "jpeg", "png", "heic", "gif", "webp", "tiff", "bmp"].contains(file.fileExtension),
+               let image = NSImage(contentsOf: file.url) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
                     .frame(maxHeight: 280)
                     .frame(maxWidth: .infinity)
-                    .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 8))
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             } else if ["txt", "md", "json", "log", "swift", "py", "csv", "xml", "yaml", "yml"].contains(file.fileExtension),
-                      let handle = try? FileHandle(forReadingFrom: file.url),
-                      let headData = try? handle.read(upToCount: 4096),
-                      let snippet = String(data: headData, encoding: .utf8) {
+                      let snippet = Self.readTextSnippet(from: file.url) {
                 ScrollView {
                     Text(snippet)
                         .font(.caption.monospaced())
@@ -333,7 +335,14 @@ private struct FilePreviewModal: View {
                         .padding(10)
                 }
                 .frame(height: 220)
-                .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                Text("Inline preview is supported for image and text files. Use 'Open in Default App' or 'Reveal in Finder' to inspect this file.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
             }
 
             HStack {
@@ -348,6 +357,13 @@ private struct FilePreviewModal: View {
         }
         .padding(20)
         .frame(width: 560)
+    }
+
+    private static func readTextSnippet(from url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let headData = try? handle.read(upToCount: 4096) else { return nil }
+        return String(data: headData, encoding: .utf8)
     }
 }
 

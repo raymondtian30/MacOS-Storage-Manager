@@ -199,7 +199,14 @@ public actor SystemDataAnalyzer {
                 continue
             }
 
-            let (size, hadPermissionIssue) = measureDirectoryBytes(at: url, maxFiles: maxFilesPerLocation)
+            let excludedSubpath = spec.relativeOrAbsolutePath == "Library/Caches"
+                ? URL(fileURLWithPath: home).appendingPathComponent("Library/Caches/Homebrew").standardizedFileURL.path
+                : nil
+            let (size, hadPermissionIssue, wasTruncated) = measureDirectoryBytes(
+                at: url,
+                maxFiles: maxFilesPerLocation,
+                excludingSubpath: excludedSubpath
+            )
             totalMeasured += size
             if hadPermissionIssue {
                 restrictedCount += 1
@@ -211,7 +218,7 @@ public actor SystemDataAnalyzer {
                     locationPath: fullPath,
                     url: url,
                     sizeBytes: size,
-                    measurability: .measured,
+                    measurability: wasTruncated ? .estimated : .measured,
                     explanation: spec.explanation,
                     recommendation: spec.recommendation,
                     potentialRisks: spec.potentialRisks,
@@ -249,7 +256,12 @@ public actor SystemDataAnalyzer {
         )
     }
 
-    private func measureDirectoryBytes(at directoryURL: URL, maxFiles: Int, maxSeconds: TimeInterval = 0.6) -> (Int64, Bool) {
+    private func measureDirectoryBytes(
+        at directoryURL: URL,
+        maxFiles: Int,
+        maxSeconds: TimeInterval = 0.6,
+        excludingSubpath: String? = nil
+    ) -> (Int64, Bool, Bool) {
         let keys: [URLResourceKey] = [
             .isSymbolicLinkKey,
             .totalFileAllocatedSizeKey,
@@ -266,15 +278,24 @@ public actor SystemDataAnalyzer {
                 return true
             }
         ) else {
-            return (0, true)
+            return (0, true, false)
         }
 
         let deadline = Date().addingTimeInterval(maxSeconds)
         var total: Int64 = 0
         var count = 0
+        var truncated = false
         while let fileURL = enumerator.nextObject() as? URL {
+            if let excludingSubpath {
+                let p = fileURL.standardizedFileURL.path
+                if p == excludingSubpath || p.hasPrefix(excludingSubpath + "/") {
+                    enumerator.skipDescendants()
+                    continue
+                }
+            }
             count += 1
             if count > maxFiles || (count % 256 == 0 && Date() >= deadline) {
+                truncated = true
                 break
             }
             guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
@@ -284,6 +305,6 @@ public actor SystemDataAnalyzer {
             let size = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
             total += Int64(size)
         }
-        return (total, permissionErrorOccurred)
+        return (total, permissionErrorOccurred, truncated)
     }
 }

@@ -34,6 +34,7 @@ public final class AppState {
     public var latestScanResult: ScanResult?
     public var analyzerCurrentNode: FileNode?
     public var analyzerBreadcrumbs: [FileNode] = []
+    public var analyzerCategoryFilter: StorageCategory?
 
     // Duplicate Finder state
     public var isFindingDuplicates: Bool = false
@@ -105,6 +106,7 @@ public final class AppState {
 
     private var activeScanTask: Task<Void, Never>?
     private var activeDuplicateTask: Task<Void, Never>?
+    private var currentScanID: UUID = UUID()
 
     public init(historyStore: HistoryStore = HistoryStore()) {
         self.historyStore = historyStore
@@ -156,6 +158,8 @@ public final class AppState {
         selectedScanRoot = targetURL
         activeScanTask?.cancel()
 
+        let scanID = UUID()
+        currentScanID = scanID
         isScanning = true
         activeErrorMessage = nil
         statusBannerMessage = nil
@@ -172,10 +176,11 @@ public final class AppState {
             do {
                 let result = try await scanner.scan(rootURL: targetURL, configuration: config) { [weak self] progress in
                     Task { @MainActor [weak self] in
-                        self?.scanProgress = progress
+                        guard let self, self.currentScanID == scanID else { return }
+                        self.scanProgress = progress
                     }
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self.currentScanID == scanID else { return }
 
                 self.latestScanResult = result
                 self.volumeStats = result.volumeStats
@@ -197,9 +202,11 @@ public final class AppState {
                     postScanCompletedNotification(result: result)
                 }
             } catch is CancellationError {
+                guard self.currentScanID == scanID else { return }
                 self.isScanning = false
                 self.statusBannerMessage = "Storage scan cancelled."
             } catch {
+                guard self.currentScanID == scanID else { return }
                 self.isScanning = false
                 self.activeErrorMessage = error.localizedDescription
             }
@@ -242,21 +249,32 @@ public final class AppState {
         let minBytes = Int64(max(0.01, duplicateMinimumSizeMB) * 1024 * 1024)
         let files = scanResult.allFiles
 
-        do {
-            let groups = try await duplicateDetector.findDuplicates(
-                in: files,
-                minimumBytes: minBytes
-            ) { [weak self] processed, total in
-                Task { @MainActor [weak self] in
-                    self?.duplicateProgress = (processed, total)
+        let task = Task { @MainActor in
+            do {
+                let groups = try await duplicateDetector.findDuplicates(
+                    in: files,
+                    minimumBytes: minBytes
+                ) { [weak self] processed, total in
+                    Task { @MainActor [weak self] in
+                        self?.duplicateProgress = (processed, total)
+                    }
                 }
+                guard !Task.isCancelled else { return }
+                self.duplicateGroups = groups
+                self.isFindingDuplicates = false
+                self.rebuildCleanupRecommendations()
+            } catch {
+                self.isFindingDuplicates = false
             }
-            self.duplicateGroups = groups
-            self.isFindingDuplicates = false
-            rebuildCleanupRecommendations()
-        } catch {
-            self.isFindingDuplicates = false
         }
+        activeDuplicateTask = task
+        await task.value
+    }
+
+    public func cancelDuplicateScan() {
+        activeDuplicateTask?.cancel()
+        activeDuplicateTask = nil
+        isFindingDuplicates = false
     }
 
     public func toggleDuplicateSelection(groupID: String, fileID: String) {
@@ -308,14 +326,41 @@ public final class AppState {
         lastCleanupResult = result
         refreshVolumeStats()
 
-        // Remove trashed paths from in-memory lists immediately
-        let trashedSet = Set(urls.map { $0.standardizedFileURL.path })
+        let failedPaths = Set(result.failures.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
+        let trashedSet = Set(
+            urls.map { $0.standardizedFileURL.path }
+                .filter { !failedPaths.contains($0) }
+        )
+
         cleanupCandidates.removeAll { trashedSet.contains($0.locationURL.standardizedFileURL.path) }
 
         for idx in duplicateGroups.indices {
             duplicateGroups[idx].files.removeAll { trashedSet.contains($0.url.standardizedFileURL.path) }
         }
         duplicateGroups.removeAll { $0.files.count < 2 }
+
+        if let currentScan = latestScanResult, !trashedSet.isEmpty {
+            let updatedLarge = currentScan.largeFiles.filter { !trashedSet.contains($0.url.standardizedFileURL.path) }
+            let updatedAll = currentScan.allFiles.filter { !trashedSet.contains($0.url.standardizedFileURL.path) }
+            latestScanResult = ScanResult(
+                id: currentScan.id,
+                timestamp: currentScan.timestamp,
+                rootURL: currentScan.rootURL,
+                durationSeconds: currentScan.durationSeconds,
+                rootNode: currentScan.rootNode,
+                categoryBytes: currentScan.categoryBytes,
+                largeFiles: updatedLarge,
+                allFiles: updatedAll,
+                totalFilesScanned: currentScan.totalFilesScanned,
+                totalDirectoriesScanned: currentScan.totalDirectoriesScanned,
+                permissionErrorCount: currentScan.permissionErrorCount,
+                volumeStats: volumeStats
+            )
+            if var node = analyzerCurrentNode {
+                node.children.removeAll { trashedSet.contains($0.url.standardizedFileURL.path) }
+                analyzerCurrentNode = node
+            }
+        }
 
         if result.movedToTrashCount > 0 {
             statusBannerMessage = "Moved \(result.movedToTrashCount) item(s) (\(ByteFormatting.string(result.reclaimedBytes))) to Trash."
@@ -358,6 +403,15 @@ public final class AppState {
             growthDeltas: growthDeltas,
             shareFullPaths: shareFullPathsWithAI
         )
+    }
+
+    public func clearAIChat() {
+        aiMessages = [
+            AIMessage(
+                role: .assistant,
+                content: "Conversation cleared. Ask me any question about your latest storage scan, System Data, or cleanup recommendations."
+            )
+        ]
     }
 
     public func sendAIMessage(_ prompt: String) async {

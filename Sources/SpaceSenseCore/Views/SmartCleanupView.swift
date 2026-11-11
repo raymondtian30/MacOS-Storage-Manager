@@ -11,7 +11,7 @@ public struct SmartCleanupView: View {
 
     public var body: some View {
         let filtered = filteredCandidates()
-        let selectedCandidates = appState.cleanupCandidates.filter(\.isSelected)
+        let selectedCandidates = filtered.filter(\.isSelected)
         let selectedBytes = selectedCandidates.reduce(Int64(0)) { $0 + $1.sizeBytes }
 
         VStack(alignment: .leading, spacing: 16) {

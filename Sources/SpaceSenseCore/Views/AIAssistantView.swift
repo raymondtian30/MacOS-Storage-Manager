@@ -29,6 +29,15 @@ public struct AIAssistantView: View {
                 )
 
                 Button {
+                    appState.clearAIChat()
+                } label: {
+                    Label("Clear Chat", systemImage: "trash")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .disabled(appState.isAIThinking)
+
+                Button {
                     showingContextInspector = true
                 } label: {
                     Label("Inspect Shared Telemetry", systemImage: "eye.trianglebadge.exclamationmark")
@@ -223,7 +232,7 @@ private struct TelemetryPreviewSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
             }
-            .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(20)
         .frame(width: 640, height: 480)

@@ -29,10 +29,16 @@ public actor DuplicateDetector {
     ) async throws -> [DuplicateGroup] {
         try Task.checkCancellation()
 
-        // Stage 1: Group by exact file size (never group by filename)
+        // Stage 1: Group by exact logical byte size (never group by filename) and deduplicate hard links
         var sizeGroups: [Int64: [LargeFileItem]] = [:]
-        for item in candidates where item.size >= minimumBytes {
-            sizeGroups[item.size, default: []].append(item)
+        var seenInodes: Set<Data> = []
+        for item in candidates where item.logicalSize >= minimumBytes {
+            if let inode = item.resourceIdentifier {
+                if !seenInodes.insert(inode).inserted {
+                    continue
+                }
+            }
+            sizeGroups[item.logicalSize, default: []].append(item)
         }
 
         let potentialBySize = sizeGroups.values.filter { $0.count > 1 }
@@ -43,21 +49,30 @@ public actor DuplicateDetector {
 
         for group in potentialBySize {
             try Task.checkCancellation()
-            guard let fileSize = group.first?.size else { continue }
+            guard let logicalFileSize = group.first?.logicalSize else { continue }
 
             // Stage 2: Partial hash check for files > 64 KB
             let partialThreshold: Int64 = 64 * 1024
             var partialBuckets: [String: [LargeFileItem]] = [:]
 
-            if fileSize > partialThreshold {
+            if logicalFileSize > partialThreshold {
                 for file in group {
                     try Task.checkCancellation()
                     if let pHash = computePartialSHA256(for: file) {
                         partialBuckets[pHash, default: []].append(file)
+                    } else {
+                        processedFiles += 1
+                        onProgress?(processedFiles, max(totalCandidateFiles, 1))
                     }
                 }
             } else {
                 partialBuckets["small-file-direct-full-hash"] = group
+            }
+
+            // Account for Stage 2 non-colliding files in progress
+            for (_, subGroup) in partialBuckets where subGroup.count == 1 {
+                processedFiles += 1
+                onProgress?(processedFiles, max(totalCandidateFiles, 1))
             }
 
             // Stage 3: Full SHA-256 hash for files that collided on size + partial hash
@@ -65,7 +80,7 @@ public actor DuplicateDetector {
                 var fullBuckets: [String: [LargeFileItem]] = [:]
                 for file in subGroup {
                     try Task.checkCancellation()
-                    if let fullHash = computeFullSHA256(for: file) {
+                    if let fullHash = try computeFullSHA256(for: file) {
                         fullBuckets[fullHash, default: []].append(file)
                     }
                     processedFiles += 1
@@ -86,7 +101,7 @@ public actor DuplicateDetector {
                     let items = sorted.enumerated().map { index, item in
                         DuplicateFileItem(
                             url: item.url,
-                            size: item.size,
+                            size: item.logicalSize,
                             modificationDate: item.modificationDate,
                             isMarkedForRemoval: index > 0 // Keep first copy by default
                         )
@@ -95,7 +110,7 @@ public actor DuplicateDetector {
                     duplicateGroups.append(
                         DuplicateGroup(
                             sha256Hash: sha256,
-                            fileSize: fileSize,
+                            fileSize: logicalFileSize,
                             files: items
                         )
                     )
@@ -110,7 +125,7 @@ public actor DuplicateDetector {
     private func cacheKey(for item: LargeFileItem) -> FileDigestCacheKey {
         FileDigestCacheKey(
             path: item.path,
-            size: item.size,
+            size: item.logicalSize,
             modificationTimeInterval: item.modificationDate?.timeIntervalSince1970 ?? 0
         )
     }
@@ -133,8 +148,8 @@ public actor DuplicateDetector {
         }
         hasher.update(data: headData)
 
-        if item.size > Int64(chunkSize * 2) {
-            let tailOffset = UInt64(max(0, item.size - Int64(chunkSize)))
+        if item.logicalSize > Int64(chunkSize * 2) {
+            let tailOffset = UInt64(max(0, item.logicalSize - Int64(chunkSize)))
             if (try? handle.seek(toOffset: tailOffset)) != nil,
                let tailData = try? handle.read(upToCount: chunkSize) {
                 hasher.update(data: tailData)
@@ -146,7 +161,7 @@ public actor DuplicateDetector {
         return digest
     }
 
-    private func computeFullSHA256(for item: LargeFileItem) -> String? {
+    private func computeFullSHA256(for item: LargeFileItem) throws -> String? {
         let key = cacheKey(for: item)
         if let cached = fullHashCache[key] {
             return cached
@@ -160,6 +175,7 @@ public actor DuplicateDetector {
         let bufferSize = 256 * 1024
 
         while true {
+            try Task.checkCancellation()
             guard let chunk = try? handle.read(upToCount: bufferSize), !chunk.isEmpty else {
                 break
             }

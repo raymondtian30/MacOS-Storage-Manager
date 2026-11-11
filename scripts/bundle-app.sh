@@ -52,4 +52,6 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 </plist>
 EOF
 
+xattr -cr "${APP_BUNDLE}" 2>/dev/null || true
+codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
 echo "Packaged ${APP_BUNDLE} successfully."

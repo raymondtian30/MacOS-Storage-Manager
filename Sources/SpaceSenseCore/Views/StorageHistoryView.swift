@@ -126,9 +126,9 @@ public struct StorageHistoryView: View {
                     Chart {
                         ForEach(appState.historySnapshots) { snap in
                             let catBytes = snap.categoryBreakdown[selectedCategoryForChart.rawValue] ?? 0
-                            let mbValue = Double(catBytes) / (1024.0 * 1024.0)
+                            let mbValue = Double(catBytes) / 1_000_000.0
                             BarMark(
-                                x: .value("Scan", snap.timestamp.formatted(date: .numeric, time: .shortened)),
+                                x: .value("Scan", "#\(snap.id) \(snap.timestamp.formatted(date: .omitted, time: .shortened))"),
                                 y: .value("Size (MB)", mbValue)
                             )
                             .foregroundStyle(selectedCategoryForChart.color)

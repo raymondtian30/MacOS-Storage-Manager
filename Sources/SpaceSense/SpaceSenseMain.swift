@@ -74,11 +74,20 @@ struct SpaceSenseApp: App {
                     appState.startScan()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
+                .disabled(appState.isScanning)
 
                 Button("Choose Folder to Scan…") {
                     appState.chooseDirectoryAndScan()
                 }
                 .keyboardShortcut("o", modifiers: [.command])
+                .disabled(appState.isScanning)
+
+                if appState.isScanning {
+                    Button("Cancel Active Scan") {
+                        appState.cancelScan()
+                    }
+                    .keyboardShortcut(".", modifiers: [.command])
+                }
 
                 Divider()
 
@@ -86,6 +95,14 @@ struct SpaceSenseApp: App {
                     Task { await appState.refreshSystemData() }
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
+                .disabled(appState.isAnalyzingSystemData)
+
+                Divider()
+
+                Button("Settings…") {
+                    appState.selectedSection = .settings
+                }
+                .keyboardShortcut(",", modifiers: [.command])
             }
         }
     }

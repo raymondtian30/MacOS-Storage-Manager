@@ -7,19 +7,54 @@ public struct SmartCleanupEngine: Sendable {
         "/usr",
         "/bin",
         "/sbin",
+        "/etc",
+        "/dev",
         "/Library/Apple",
-        "/private/var/db"
+        "/private/etc",
+        "/private/var/db",
+        "/private/var/vm"
     ]
 
     public init() {}
 
     public static func isProtectedSystemPath(_ path: String) -> Bool {
-        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
-        if standardized == "/" || standardized == "/Applications" || standardized == "/Users" {
-            return true
-        }
-        for prefix in protectedPrefixes {
-            if standardized == prefix || standardized.hasPrefix(prefix + "/") {
+        let url = URL(fileURLWithPath: path)
+        let standardized = url.standardizedFileURL.path
+        let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+
+        let exactProtected: Set<String> = [
+            "/",
+            "/Applications",
+            "/Library",
+            "/Users",
+            "/Volumes",
+            "/private",
+            "/var",
+            "/opt",
+            "/cores",
+            home,
+            "\(home)/Desktop",
+            "\(home)/Documents",
+            "\(home)/Downloads",
+            "\(home)/Library",
+            "\(home)/Library/Application Support",
+            "\(home)/Library/Keychains",
+            "\(home)/Library/Preferences",
+            "\(home)/Library/Containers"
+        ]
+
+        for candidate in [standardized, resolved] {
+            if exactProtected.contains(candidate) {
+                return true
+            }
+            for prefix in protectedPrefixes {
+                if candidate == prefix || candidate.hasPrefix(prefix + "/") {
+                    return true
+                }
+            }
+            if candidate.hasPrefix("\(home)/Library/Keychains/") ||
+               candidate.hasPrefix("\(home)/Library/Containers/") {
                 return true
             }
         }
@@ -48,6 +83,7 @@ public struct SmartCleanupEngine: Sendable {
                 // Old Disk Images & Package Installers (.dmg, .pkg, .iso) >= 10 MB
                 if ["dmg", "pkg", "iso"].contains(ext), file.size >= 10 * 1024 * 1024 {
                     seenPaths.insert(path)
+                    let isInDownloads = lowerPath.contains("/downloads/")
                     candidates.append(
                         CleanupCandidate(
                             kind: .oldInstallers,
@@ -57,8 +93,8 @@ public struct SmartCleanupEngine: Sendable {
                             sizeBytes: file.size,
                             whyRecommended: "Installer packages and disk images are typically no longer needed after the application has been installed into /Applications.",
                             potentialConsequences: "If you need to reinstall this version offline later, you would need to download the installer again.",
-                            risk: .low,
-                            isSelected: true
+                            risk: isInDownloads ? .low : .moderate,
+                            isSelected: isInDownloads
                         )
                     )
                     continue
@@ -206,10 +242,46 @@ public struct SmartCleanupEngine: Sendable {
 
         var movedCount = 0
         var reclaimed: Int64 = 0
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let containerRootsToKeepIntact: Set<String> = [
+            "\(home)/Library/Caches",
+            "\(home)/Library/Logs",
+            "\(home)/Library/Developer/Xcode/DerivedData",
+            "/private/var/tmp"
+        ]
 
-        for url in safeURLs {
+        // Sort shortest path first and skip children whose parent is already in safeURLs
+        let sortedSafeURLs = safeURLs.sorted { $0.standardizedFileURL.path.count < $1.standardizedFileURL.path.count }
+        var processedParentPaths: [String] = []
+
+        for url in sortedSafeURLs {
             let path = url.standardizedFileURL.path
+            if processedParentPaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) {
+                continue
+            }
+            processedParentPaths.append(path)
+
             let size = itemSizes[url] ?? (Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0))
+
+            // If url is a standard system container directory (like ~/Library/Caches), trash its child items rather than the container root
+            if containerRootsToKeepIntact.contains(path),
+               let children = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) {
+                var childMoved = 0
+                for child in children {
+                    var trashedURL: NSURL?
+                    if (try? FileManager.default.trashItem(at: child, resultingItemURL: &trashedURL)) != nil {
+                        childMoved += 1
+                    }
+                }
+                if childMoved > 0 || children.isEmpty {
+                    movedCount += 1
+                    reclaimed += size
+                } else {
+                    failures.append((path: path, reason: "Could not move contents of '\(url.lastPathComponent)' to Trash."))
+                }
+                continue
+            }
+
             do {
                 var trashedURL: NSURL?
                 try FileManager.default.trashItem(at: url, resultingItemURL: &trashedURL)

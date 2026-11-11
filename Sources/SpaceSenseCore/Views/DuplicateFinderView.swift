@@ -13,7 +13,7 @@ public struct DuplicateFinderView: View {
     public var body: some View {
         let groups = filteredGroups()
         let totalReclaimable = appState.duplicateGroups.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
-        let selectedFiles = selectedDuplicateFiles()
+        let selectedFiles = groups.flatMap { $0.files.filter(\.isMarkedForRemoval) }
         let selectedBytes = selectedFiles.reduce(Int64(0)) { $0 + $1.size }
 
         VStack(alignment: .leading, spacing: 16) {
@@ -59,6 +59,13 @@ public struct DuplicateFinderView: View {
                         Text("Computing SHA-256 digests via Apple CryptoKit (\(appState.duplicateProgress.processed) / \(appState.duplicateProgress.total) candidate files)…")
                             .font(.caption)
                         Spacer()
+                        Button(role: .cancel) {
+                            appState.cancelDuplicateScan()
+                        } label: {
+                            Label("Cancel", systemImage: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
                 }
             }

@@ -132,13 +132,13 @@ public struct OverviewView: View {
                 }
 
                 GeometryReader { geo in
-                    let totalWidth = max(geo.size.width, 1)
+                    let totalWidth = max(geo.size.width - 16, 1)
                     let segments = categorySegments()
                     HStack(spacing: 2) {
                         ForEach(segments, id: \.category) { segment in
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
                                 .fill(segment.category.color)
-                                .frame(width: max(6, totalWidth * segment.fraction))
+                                .frame(width: max(4, totalWidth * segment.fraction))
                                 .help("\(segment.category.rawValue): \(ByteFormatting.string(segment.bytes))")
                         }
                         Spacer(minLength: 0)
@@ -159,6 +159,7 @@ public struct OverviewView: View {
                     ForEach(StorageCategory.allCases) { category in
                         let bytes = categoryByteValue(for: category)
                         Button {
+                            appState.analyzerCategoryFilter = category
                             appState.selectedSection = .analyzer
                         } label: {
                             HStack(spacing: 10) {
@@ -335,12 +336,16 @@ public struct OverviewView: View {
     }
 
     private func categorySegments() -> [(category: StorageCategory, bytes: Int64, fraction: CGFloat)] {
-        let totalCap = max(Double(appState.volumeStats.totalBytes), 1)
-        return StorageCategory.allCases.compactMap { cat in
+        let nonZero = StorageCategory.allCases.compactMap { cat -> (StorageCategory, Int64)? in
             let bytes = categoryByteValue(for: cat)
-            guard bytes > 0 else { return nil }
-            let fraction = min(0.95, max(0.015, Double(bytes) / totalCap))
-            return (cat, bytes, CGFloat(fraction))
+            return bytes > 0 ? (cat, bytes) : nil
+        }
+        let sumBytes = nonZero.reduce(Int64(0)) { $0 + $1.1 }
+        let denominator = max(Double(sumBytes), 1)
+        let utilRatio = min(0.96, max(0.15, appState.volumeStats.utilizationPercentage / 100.0))
+        return nonZero.map { (cat, bytes) in
+            let fraction = (Double(bytes) / denominator) * utilRatio
+            return (cat, bytes, CGFloat(max(0.01, fraction)))
         }
     }
 }

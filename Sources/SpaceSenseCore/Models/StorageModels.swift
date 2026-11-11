@@ -89,6 +89,13 @@ public enum StorageCategory: String, CaseIterable, Codable, Identifiable, Sendab
         if lowerPath.contains("/downloads/") || lowerPath.hasSuffix("/downloads") {
             return .downloads
         }
+        if (lowerPath.contains("/library/") && !lowerPath.contains("/library/developer/")) ||
+            lowerPath.hasPrefix("/system/") ||
+            lowerPath.hasPrefix("/private/") ||
+            lowerPath.hasPrefix("/var/") ||
+            lowerPath.hasPrefix("/usr/") {
+            return .systemData
+        }
         if lowerPath.contains("/developer/") ||
             lowerPath.contains("/deriveddata/") ||
             lowerPath.contains("/coresimulator/") ||
@@ -98,13 +105,6 @@ public enum StorageCategory: String, CaseIterable, Codable, Identifiable, Sendab
             lowerPath.contains("/.gradle/") ||
             ["swift", "xcodeproj", "xcworkspace", "py", "js", "ts", "tsx", "rs", "go", "c", "cpp", "h", "java", "kt", "o", "dylib", "a"].contains(ext) {
             return .developer
-        }
-        if lowerPath.contains("/library/") ||
-            lowerPath.hasPrefix("/system/") ||
-            lowerPath.hasPrefix("/private/") ||
-            lowerPath.hasPrefix("/var/") ||
-            lowerPath.hasPrefix("/usr/") {
-            return .systemData
         }
         if lowerPath.contains("/pictures/") ||
             lowerPath.contains("/movies/") ||
@@ -151,16 +151,21 @@ public struct VolumeStats: Codable, Equatable, Sendable {
     }
 
     public static func currentBootVolume() -> VolumeStats {
-        let rootURL = URL(fileURLWithPath: "/")
+        forURL(URL(fileURLWithPath: "/"))
+    }
+
+    public static func forURL(_ url: URL) -> VolumeStats {
         let keys: Set<URLResourceKey> = [
             .volumeNameKey,
+            .volumeURLKey,
             .volumeTotalCapacityKey,
             .volumeAvailableCapacityForImportantUsageKey,
             .volumeAvailableCapacityKey,
             .volumeIsReadOnlyKey
         ]
-        if let values = try? rootURL.resourceValues(forKeys: keys) {
+        if let values = try? url.resourceValues(forKeys: keys) {
             let name = values.volumeName ?? "Macintosh HD"
+            let mount = values.volume?.path ?? "/"
             let total = Int64(values.volumeTotalCapacity ?? 0)
             let availableImportant = values.volumeAvailableCapacityForImportantUsage ?? 0
             let availableStandard = Int64(values.volumeAvailableCapacity ?? 0)
@@ -169,7 +174,7 @@ public struct VolumeStats: Codable, Equatable, Sendable {
             let readOnly = values.volumeIsReadOnly ?? false
             return VolumeStats(
                 volumeName: name,
-                mountPoint: "/",
+                mountPoint: mount,
                 totalBytes: total,
                 availableBytes: available,
                 usedBytes: used,
@@ -177,11 +182,11 @@ public struct VolumeStats: Codable, Equatable, Sendable {
             )
         }
         return VolumeStats(
-            volumeName: "Macintosh HD",
-            mountPoint: "/",
-            totalBytes: 500_000_000_000,
-            availableBytes: 100_000_000_000,
-            usedBytes: 400_000_000_000
+            volumeName: "Unknown Volume",
+            mountPoint: url.path,
+            totalBytes: 1,
+            availableBytes: 0,
+            usedBytes: 0
         )
     }
 }
@@ -229,7 +234,11 @@ public struct FileNode: Identifiable, Hashable, Sendable {
     }
 
     public static func == (lhs: FileNode, rhs: FileNode) -> Bool {
-        lhs.id == rhs.id && lhs.size == rhs.size
+        lhs.id == rhs.id &&
+        lhs.size == rhs.size &&
+        lhs.itemCount == rhs.itemCount &&
+        lhs.isAccessible == rhs.isAccessible &&
+        lhs.children.count == rhs.children.count
     }
 }
 
@@ -239,24 +248,30 @@ public struct LargeFileItem: Identifiable, Hashable, Sendable {
     public let name: String
     public let path: String
     public let size: Int64
+    public let logicalSize: Int64
     public let modificationDate: Date?
     public let fileExtension: String
     public let category: StorageCategory
+    public let resourceIdentifier: Data?
 
     public init(
         url: URL,
         size: Int64,
+        logicalSize: Int64? = nil,
         modificationDate: Date?,
-        category: StorageCategory? = nil
+        category: StorageCategory? = nil,
+        resourceIdentifier: Data? = nil
     ) {
         self.id = url.path
         self.url = url
         self.name = url.lastPathComponent
         self.path = url.path
         self.size = size
+        self.logicalSize = logicalSize ?? size
         self.modificationDate = modificationDate
         self.fileExtension = url.pathExtension.lowercased()
         self.category = category ?? StorageCategory.classify(url: url, isDirectory: false)
+        self.resourceIdentifier = resourceIdentifier
     }
 }
 
