@@ -384,7 +384,7 @@ public struct SettingsView: View {
                 } else {
                     Image(systemName: "arrow.triangle.2.circlepath")
                 }
-                Text(appState.isCheckingForUpdates ? "Checking…" : "Check for Updates")
+                Text(appState.isCheckingForUpdates ? "Updating…" : "Check for Updates")
                     .lineLimit(1)
             }
         }

@@ -23,7 +23,7 @@ public enum AppAppearanceMode: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 @Observable
 public final class AppState {
-    public nonisolated static let currentVersion = "1.3.0"
+    public nonisolated static let currentVersion = "1.3.1"
 
     // Navigation
     public var selectedSection: NavigationSection = .overview
@@ -804,6 +804,15 @@ public final class AppState {
                 if let parsedURL = URL(string: htmlURLString), parsedURL.scheme == "https" {
                     availableUpdateURL = parsedURL
                 }
+                let assets = json["assets"] as? [[String: Any]] ?? []
+                if let zipString = assets.compactMap({ $0["browser_download_url"] as? String }).first(where: { $0.hasSuffix("-macOS-arm64.zip") }),
+                   let zipURL = URL(string: zipString), zipURL.scheme == "https", zipURL.host == "github.com" {
+                    do {
+                        try await installUpdate(from: zipURL, tag: tagName)
+                    } catch {
+                        updateStatusMessage = "Update \(tagName) available, but auto-install failed (\(error.localizedDescription)). Download it manually."
+                    }
+                }
             } else {
                 updateStatusMessage = "SpaceSense v\(Self.currentVersion) is up to date."
             }
@@ -812,6 +821,53 @@ public final class AppState {
         }
 
         isCheckingForUpdates = false
+    }
+
+    /// Downloads the release zip, verifies it, then swaps it in for the running app after it quits and relaunches it.
+    private func installUpdate(from zipURL: URL, tag: String) async throws {
+        let appPath = Bundle.main.bundlePath
+        guard appPath.hasSuffix(".app") else {
+            throw NSError(domain: "SpaceSense", code: 1, userInfo: [NSLocalizedDescriptionKey: "not running from an installed .app"])
+        }
+        updateStatusMessage = "Downloading \(tag)…"
+        let (downloadedZip, _) = try await URLSession.shared.download(from: zipURL)
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("SpaceSenseUpdate-\(UUID().uuidString)")
+        let newApp = work.appendingPathComponent("SpaceSense.app")
+        updateStatusMessage = "Installing \(tag)…"
+        try await Task.detached {
+            try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+            try Self.runTool("/usr/bin/ditto", ["-x", "-k", downloadedZip.path, work.path])
+            try Self.runTool("/usr/bin/codesign", ["--verify", "--deep", "--strict", newApp.path])
+        }.value
+
+        let newBundle = Bundle(url: newApp)
+        let expectedVersion = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
+        guard newBundle?.bundleIdentifier == Bundle.main.bundleIdentifier,
+              newBundle?.infoDictionary?["CFBundleShortVersionString"] as? String == expectedVersion else {
+            throw NSError(domain: "SpaceSense", code: 2, userInfo: [NSLocalizedDescriptionKey: "downloaded app did not match \(tag)"])
+        }
+
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let relaunch = Process()
+        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        relaunch.arguments = [
+            "-c",
+            "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; rm -rf \"$1\" && /usr/bin/ditto \"$2\" \"$1\"; /usr/bin/open \"$1\"",
+            "sh", appPath, newApp.path
+        ]
+        try relaunch.run()
+        NSApp.terminate(nil)
+    }
+
+    private nonisolated static func runTool(_ path: String, _ args: [String]) throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        try p.run()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            throw NSError(domain: "SpaceSense", code: 3, userInfo: [NSLocalizedDescriptionKey: "\((path as NSString).lastPathComponent) failed"])
+        }
     }
 
     private static func isRemoteVersionNewer(remoteTag: String, currentVersion: String) -> Bool {

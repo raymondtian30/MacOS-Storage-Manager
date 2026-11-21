@@ -1,6 +1,6 @@
 # SpaceSense — AI-Powered macOS Storage Manager
 
-**Current Version:** `v1.3.0`
+**Current Version:** `v1.3.1`
 
 SpaceSense is a native macOS Dock application built with Swift and SwiftUI for Apple Silicon Macs (macOS 14+). It helps users understand, analyze, visualize, organize, and safely reclaim disk space on their Macs using local filesystem telemetry, cryptographic SHA-256 duplicate detection, SQLite storage history, and an optional Google Gemini AI assistant.
 
@@ -55,6 +55,7 @@ swift test --enable-swift-testing --disable-xctest
 
 ## Version History
 
+- **`v1.3.1`** — Check for Updates now downloads, verifies, installs, and relaunches the newest GitHub release automatically.
 - **`v1.3.0`** — Delete Hub renamed **Space Reclaimer**: junk deep scan with confidence scoring, Conservative/Balanced/Max aggressiveness, and permanent deletion (with Move to Trash option) that frees space immediately.
 - **`v1.2.2`** — Major post-scan performance and UI responsiveness optimizations: zero-I/O System Data reuse from scan tree measurements, throttled duplicate hashing with cooperative yielding and internal-directory exclusions, background SQLite snapshot persistence, precomputed static path-protection tables, cached `ByteFormatting` & `NSWorkspace` file icons, scoped treemap/list hover state, and native SwiftUI progress bars.
 - **`v1.2.1`** — Responsive fluid window shrinking (`680×480` minimum with adaptive grids, `ViewThatFits` headers/toolbars, and dynamic split views), full tree & System Data state pruning after Trash operations, hardened protected-path & SHA-256 read verification, and multi-agent review improvements.

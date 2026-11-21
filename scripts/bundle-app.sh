@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="SpaceSense"
-VERSION="1.3.0"
+VERSION="1.3.1"
 BUILD_DIR="${ROOT_DIR}/build"
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/spacesense-stage.XXXXXX")"
 STAGE_APP="${STAGE_DIR}/${APP_NAME}.app"
