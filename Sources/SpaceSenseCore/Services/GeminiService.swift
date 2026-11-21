@@ -291,7 +291,7 @@ public struct GeminiService: Sendable {
         lines.append("\n--- DELETE HUB (DUPLICATES, UNUSED LARGE FILES & SAFE CLEANUP) ---")
         lines.append("Exact SHA-256 Duplicate Groups: \(duplicateGroups.count) (\(ByteFormatting.string(totalDupReclaimable)) potentially reclaimable)")
         let totalCleanupBytes = cleanupCandidates.reduce(0) { $0 + $1.sizeBytes }
-        lines.append("Delete Hub Candidates: \(cleanupCandidates.count) items totaling \(ByteFormatting.string(totalCleanupBytes))")
+        lines.append("Space Reclaimer Candidates: \(cleanupCandidates.count) items totaling \(ByteFormatting.string(totalCleanupBytes))")
         for candidate in cleanupCandidates.prefix(10) {
             let safePath = formatPath(candidate.locationURL.path, shareFullPaths: shareFullPaths)
             lines.append("- [\(candidate.kind.rawValue)] \(safePath): \(ByteFormatting.string(candidate.sizeBytes)) (\(candidate.risk.rawValue))")
@@ -332,7 +332,7 @@ public struct GeminiService: Sendable {
         3. Clearly distinguish MEASURED storage values from ESTIMATED values (such as APFS snapshots or unindexed system data) and RESTRICTED/inaccessible locations.
         4. Explain findings in clear, practical, everyday language for a Mac user.
         5. Never recommend deleting macOS System Integrity Protection (SIP) files, /System, /usr, /bin, or active Application Support databases without warning about consequences.
-        6. Always recommend moving unneeded user files or caches to Trash via SpaceSense's Delete Hub review flow rather than running destructive terminal commands.
+        6. Always recommend moving unneeded user files or caches to Trash via SpaceSense's Space Reclaimer review flow rather than running destructive terminal commands.
 
         \(contextSummary)
         """

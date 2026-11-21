@@ -25,7 +25,8 @@ public enum SelfTestRunner {
             ("5. System Data Analyzer (Measured vs. Estimated vs. Restricted)", testSystemDataAnalyzer),
             ("6. Smart Cleanup Recommendations & SIP Path Protection", testSmartCleanupAndTrash),
             ("7. SQLite HistoryStore Persistence & Growth Deltas", testSQLiteHistoryStore),
-            ("8. macOS Keychain & Gemini Telemetry Builder / Error Handling", testKeychainAndGemini)
+            ("8. macOS Keychain & Gemini Telemetry Builder / Error Handling", testKeychainAndGemini),
+            ("9. Space Reclaimer Junk Scan, Aggressiveness & Permanent Deletion", testSpaceReclaimer)
         ]
 
         for (name, block) in suites {
@@ -55,7 +56,7 @@ public enum SelfTestRunner {
         try expect(stats.totalBytes > 0, "Expected positive boot volume total capacity")
         try expect(stats.usedBytes >= 0, "Expected non-negative used storage")
         try expect(stats.availableBytes >= 0, "Expected non-negative available storage")
-        try expect(NavigationSection.allCases.count == 7, "Expected streamlined 7-section navigation with Delete Hub")
+        try expect(NavigationSection.allCases.count == 7, "Expected streamlined 7-section navigation with Space Reclaimer")
         try expect(AppState.largeFileThresholdOptionsMB.map(\.value) == [250.0, 500.0, 750.0, 1024.0], "Expected 250 MB - 1 GB threshold choices")
         try expect(AIProvider.detect(from: "AIzaSy123") == .gemini, "Expected Gemini provider auto-detection")
         try expect(AIProvider.detect(from: "sk-ant-api03-123") == .anthropic, "Expected Anthropic provider auto-detection")
@@ -298,5 +299,49 @@ public enum SelfTestRunner {
             caughtMissingKey = true
         }
         try expect(caughtMissingKey, "Expected GeminiError.missingAPIKey when key is empty")
+    }
+
+    private static func testSpaceReclaimer() async throws {
+        try expect(CleanupAggressiveness.balanced.autoSelectMin == 80 && CleanupAggressiveness.max.listMin == 0, "Expected preset thresholds")
+        let installed: Set<String> = ["com.microsoft.word"]
+        try expect(JunkScanner.isOrphanName("com.removed.SomeApp.savedState", installed: installed), "Expected removed app to be orphaned")
+        try expect(!JunkScanner.isOrphanName("com.microsoft.excel", installed: installed), "Expected same-vendor app to be kept")
+        try expect(!JunkScanner.isOrphanName("com.apple.Safari", installed: []), "Expected Apple ids to be kept")
+
+        let home = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let project = home.appendingPathComponent("Code/web", isDirectory: true)
+        let modules = project.appendingPathComponent("node_modules/pkg", isDirectory: true)
+        try FileManager.default.createDirectory(at: modules, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: project.appendingPathComponent("package.json"))
+        try Data(repeating: 1, count: 300_000).write(to: modules.appendingPathComponent("index.js"))
+        let npm = home.appendingPathComponent(".npm/_cacache", isDirectory: true)
+        try FileManager.default.createDirectory(at: npm, withIntermediateDirectories: true)
+        try Data(repeating: 2, count: 300_000).write(to: npm.appendingPathComponent("blob"))
+        let found = JunkScanner.scan(home: home, minBytes: 1)
+        try expect(found.contains { $0.kind == .projectBuildArtifacts && $0.locationURL.lastPathComponent == "node_modules" }, "Expected node_modules found")
+        try expect(found.contains { $0.kind == .packageCaches && $0.locationURL.path.hasSuffix(".npm/_cacache") }, "Expected npm cache found")
+
+        let engine = SmartCleanupEngine()
+        let balanced = engine.buildRecommendations(scanResult: nil, systemDataReport: nil, duplicateGroups: [], junkCandidates: found, aggressiveness: .balanced)
+        let conservative = engine.buildRecommendations(scanResult: nil, systemDataReport: nil, duplicateGroups: [], junkCandidates: found, aggressiveness: .conservative)
+        try expect(balanced.contains { $0.kind == .packageCaches && $0.isSelected }, "Expected Balanced to pre-select npm cache")
+        try expect(conservative.allSatisfy { !$0.isSelected }, "Expected Conservative to pre-select nothing")
+
+        let realHome = FileManager.default.homeDirectoryForCurrentUser
+        let dir = realHome.appendingPathComponent(".spacesense-selftest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("junk.bin")
+        try Data(repeating: 3, count: 4096).write(to: file)
+        let deleted = await engine.moveItemsToTrash(urls: [file], mode: .permanent)
+        try expect(deleted.movedToTrashCount == 1 && !FileManager.default.fileExists(atPath: file.path), "Expected permanent deletion")
+
+        let outside = home.appendingPathComponent("x.bin")
+        try Data(repeating: 4, count: 10).write(to: outside)
+        let refused = await engine.moveItemsToTrash(urls: [outside], mode: .permanent)
+        try expect(refused.movedToTrashCount == 0 && FileManager.default.fileExists(atPath: outside.path), "Expected permanent deletion outside home to be refused")
+        let blocked = await engine.moveItemsToTrash(urls: [URL(fileURLWithPath: "/System/Library")], mode: .permanent)
+        try expect(blocked.failures.count == 1, "Expected protected path to be refused")
     }
 }

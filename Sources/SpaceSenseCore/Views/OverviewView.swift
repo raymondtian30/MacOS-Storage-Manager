@@ -114,10 +114,10 @@ public struct OverviewView: View {
                 tooltip: "Includes APFS purgeable space that macOS automatically frees when applications request disk storage."
             )
             Button {
-                appState.selectedSection = .deleteHub
+                appState.selectedSection = .spaceReclaimer
             } label: {
                 MetricCardView(
-                    title: "Delete Hub Reclaimable",
+                    title: "Space Reclaimer Reclaimable",
                     value: ByteFormatting.string(appState.totalReclaimableBytes),
                     subtitle: "\(appState.cleanupCandidates.count) reviewable items",
                     icon: "trash.slash.fill",
@@ -223,8 +223,8 @@ public struct OverviewView: View {
                     Text("Largest Detected Files")
                         .font(.headline)
                     Spacer()
-                    Button("Open Delete Hub") {
-                        appState.selectedSection = .deleteHub
+                    Button("Open Space Reclaimer") {
+                        appState.selectedSection = .spaceReclaimer
                     }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -292,11 +292,11 @@ public struct OverviewView: View {
             SurfaceCard {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Delete Hub")
+                        Text("Space Reclaimer")
                             .font(.headline)
                         Spacer()
                         Button("Review Items") {
-                            appState.selectedSection = .deleteHub
+                            appState.selectedSection = .spaceReclaimer
                         }
                         .buttonStyle(.link)
                         .font(.caption)

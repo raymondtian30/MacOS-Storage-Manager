@@ -84,7 +84,7 @@ public struct SystemDataView: View {
                 tint: SpaceSenseTheme.secondaryAccent
             )
             Button {
-                appState.selectedSection = .deleteHub
+                appState.selectedSection = .spaceReclaimer
             } label: {
                 MetricCardView(
                     title: "Safely Cleanable",
@@ -177,8 +177,8 @@ public struct SystemDataView: View {
 
                             HStack(spacing: 6) {
                                 if item.isUserCleanable && item.recommendation == .recommended {
-                                    Button("Delete Hub") {
-                                        appState.selectedSection = .deleteHub
+                                    Button("Space Reclaimer") {
+                                        appState.selectedSection = .spaceReclaimer
                                     }
                                     .buttonStyle(.bordered)
                                     .controlSize(.small)

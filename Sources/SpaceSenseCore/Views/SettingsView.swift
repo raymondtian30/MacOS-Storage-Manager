@@ -18,12 +18,12 @@ public struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     SectionHeaderBar(
                         title: "Settings",
-                        subtitle: "AI provider & model auto-detection, Delete Hub thresholds, scan exclusions, and updates",
+                        subtitle: "AI provider & model auto-detection, Space Reclaimer thresholds, scan exclusions, and updates",
                         icon: NavigationSection.settings.icon
                     )
 
                     aiConfigurationSection
-                    deleteHubAndScanPreferencesSection
+                    reclaimerAndScanPreferencesSection
                     exclusionsSection
                     aboutAndCreditsSection
                 }
@@ -153,10 +153,10 @@ public struct SettingsView: View {
         .frame(minWidth: 150, maxWidth: 240)
     }
 
-    private var deleteHubAndScanPreferencesSection: some View {
+    private var reclaimerAndScanPreferencesSection: some View {
         SurfaceCard {
             VStack(alignment: .leading, spacing: 12) {
-                Label("Delete Hub, Scan & Appearance Preferences", systemImage: "slider.horizontal.3")
+                Label("Space Reclaimer, Scan & Appearance Preferences", systemImage: "slider.horizontal.3")
                     .font(.headline)
 
                 HStack {
@@ -192,7 +192,7 @@ public struct SettingsView: View {
                         .font(.subheadline)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
-                    InfoTooltipIcon("Large files that have not been opened or modified in macOS for at least this time period are automatically added to Delete Hub.")
+                    InfoTooltipIcon("Large files that have not been opened or modified in macOS for at least this time period are automatically added to Space Reclaimer.")
                     Picker("Unused Period", selection: $appState.unusedFileDaysThreshold) {
                         ForEach(AppState.unusedDaysOptions, id: \.days) { option in
                             Text(option.label).tag(option.days)

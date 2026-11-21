@@ -9,6 +9,13 @@ public enum CleanupKind: String, CaseIterable, Codable, Identifiable, Sendable {
     case oldInstallers = "Installers & Disk Images"
     case oldArchives = "Old Archives"
     case largeTempFiles = "Temp & Scratch Files"
+    case browserCaches = "Browser Caches"
+    case packageCaches = "Package & Dev Caches"
+    case projectBuildArtifacts = "Project Build Folders"
+    case orphanedAppData = "Uninstalled App Leftovers"
+    case trash = "Trash"
+    case iosUpdates = "iOS Updates"
+    case screenshots = "Old Screenshots"
 
     public var id: String { rawValue }
 
@@ -21,6 +28,13 @@ public enum CleanupKind: String, CaseIterable, Codable, Identifiable, Sendable {
         case .oldInstallers: return "opticaldiscdrive.fill"
         case .oldArchives: return "archivebox.fill"
         case .largeTempFiles: return "trash.circle.fill"
+        case .browserCaches: return "globe"
+        case .packageCaches: return "shippingbox.fill"
+        case .projectBuildArtifacts: return "hammer.fill"
+        case .orphanedAppData: return "app.dashed"
+        case .trash: return "trash.fill"
+        case .iosUpdates: return "iphone"
+        case .screenshots: return "camera.viewfinder"
         }
     }
 }
@@ -39,6 +53,22 @@ public enum CleanupSafetyRisk: String, Codable, Sendable {
     }
 }
 
+/// How eagerly Space Reclaimer lists and pre-selects candidates, by confidence (0–100).
+public enum CleanupAggressiveness: String, CaseIterable, Identifiable, Sendable {
+    case conservative = "Conservative"
+    case balanced = "Balanced"
+    case max = "Max"
+
+    public var id: String { rawValue }
+    public var listMin: Int { self == .conservative ? 80 : self == .balanced ? 40 : 0 }
+    public var autoSelectMin: Int { self == .conservative ? 101 : self == .balanced ? 80 : 50 }
+}
+
+public enum DeletionMode: String, Sendable {
+    case permanent = "Delete Permanently"
+    case trash = "Move to Trash"
+}
+
 public struct CleanupCandidate: Identifiable, Hashable, Sendable {
     public let id: String
     public let kind: CleanupKind
@@ -49,8 +79,9 @@ public struct CleanupCandidate: Identifiable, Hashable, Sendable {
     public let lastUsedDate: Date?
     public let whyRecommended: String
     public let potentialConsequences: String
-    public let risk: CleanupSafetyRisk
+    public let confidence: Int
     public var isSelected: Bool
+    public var risk: CleanupSafetyRisk { confidence >= 80 ? .low : confidence >= 50 ? .moderate : .high }
 
     public init(
         kind: CleanupKind,
@@ -61,7 +92,7 @@ public struct CleanupCandidate: Identifiable, Hashable, Sendable {
         lastUsedDate: Date? = nil,
         whyRecommended: String,
         potentialConsequences: String,
-        risk: CleanupSafetyRisk,
+        confidence: Int,
         isSelected: Bool = false
     ) {
         self.id = locationURL.path
@@ -73,7 +104,7 @@ public struct CleanupCandidate: Identifiable, Hashable, Sendable {
         self.lastUsedDate = lastUsedDate
         self.whyRecommended = whyRecommended
         self.potentialConsequences = potentialConsequences
-        self.risk = risk
+        self.confidence = confidence
         self.isSelected = isSelected
     }
 }

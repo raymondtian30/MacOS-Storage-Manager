@@ -64,6 +64,7 @@ public struct SmartCleanupEngine: Sendable {
 
     private static let homeProtectedSubtreesWithSlash: [String] = homeProtectedSubtrees.map { $0 + "/" }
     private static let mobileSyncBackupPrefix: String = "\(homePath)/Library/Application Support/MobileSync/Backup"
+    private static let appSupportPrefix: String = "\(homePath)/Library/Application Support/"
 
     private static let installerExtensions: Set<String> = ["dmg", "pkg", "iso"]
     private static let tempExtensions: Set<String> = ["log", "tmp", "temp", "cache"]
@@ -71,26 +72,27 @@ public struct SmartCleanupEngine: Sendable {
 
     public init() {}
 
-    public static func isProtectedSystemPath(_ path: String, resolveSymlinks: Bool = false) -> Bool {
+    /// `installedApps` (bundle ids) lets leftovers of uninstalled apps in ~/Library/Application Support through.
+    public static func isProtectedSystemPath(_ path: String, resolveSymlinks: Bool = false, installedApps: Set<String>? = nil) -> Bool {
         let primary = cleanTrailingSlash(path)
-        if isSinglePathProtected(primary) {
+        if isSinglePathProtected(primary, installedApps: installedApps) {
             return true
         }
         if resolveSymlinks {
             let url = URL(fileURLWithPath: path)
             let standardized = cleanTrailingSlash(url.standardizedFileURL.path)
-            if standardized != primary && isSinglePathProtected(standardized) {
+            if standardized != primary && isSinglePathProtected(standardized, installedApps: installedApps) {
                 return true
             }
             let resolved = cleanTrailingSlash(url.resolvingSymlinksInPath().standardizedFileURL.path)
-            if resolved != standardized && resolved != primary && isSinglePathProtected(resolved) {
+            if resolved != standardized && resolved != primary && isSinglePathProtected(resolved, installedApps: installedApps) {
                 return true
             }
         }
         return false
     }
 
-    private static func isSinglePathProtected(_ candidate: String) -> Bool {
+    private static func isSinglePathProtected(_ candidate: String, installedApps: Set<String>?) -> Bool {
         if exactProtectedPaths.contains(candidate) {
             return true
         }
@@ -104,6 +106,12 @@ public struct SmartCleanupEngine: Sendable {
         }
         if candidate.hasPrefix(homePath) {
             if candidate.hasPrefix(mobileSyncBackupPrefix) {
+                return false
+            }
+            if candidate.hasPrefix(appSupportPrefix) && JunkScanner.cacheFolderNames.contains((candidate as NSString).lastPathComponent) {
+                return false
+            }
+            if let installedApps, JunkScanner.isOrphanPath(candidate, home: homePath, installed: installedApps) {
                 return false
             }
             for i in homeProtectedSubtrees.indices {
@@ -126,10 +134,13 @@ public struct SmartCleanupEngine: Sendable {
         systemDataReport: SystemDataReport?,
         duplicateGroups: [DuplicateGroup],
         unusedDaysThreshold: Int = 90,
-        largeFileThresholdBytes: Int64 = 250 * 1024 * 1024
+        largeFileThresholdBytes: Int64 = 250 * 1024 * 1024,
+        junkCandidates: [CleanupCandidate] = [],
+        aggressiveness: CleanupAggressiveness = .balanced
     ) -> [CleanupCandidate] {
-        var candidates: [CleanupCandidate] = []
-        var seenPaths: Set<String> = []
+        var candidates: [CleanupCandidate] = junkCandidates
+        var seenPaths: Set<String> = Set(junkCandidates.map(\.locationURL.path))
+        let junkPrefixes = junkCandidates.map { $0.locationURL.path + "/" }
         let now = Date()
         let minInstallerBytes: Int64 = 10 * 1024 * 1024
         let minTempBytes: Int64 = 20 * 1024 * 1024
@@ -139,6 +150,29 @@ public struct SmartCleanupEngine: Sendable {
         // 1. Inspect scanned files for installers, archives, temp files, and unused large files
         if let scanResult {
             for file in scanResult.allFiles {
+                if junkPrefixes.contains(where: { file.path.hasPrefix($0) }) {
+                    continue
+                }
+                if file.name.hasPrefix("Screenshot ") || file.name.hasPrefix("Screen Recording ") {
+                    let days = file.daysSinceLastOpened(from: now)
+                    if days >= 30, !seenPaths.contains(file.path) {
+                        seenPaths.insert(file.path)
+                        candidates.append(
+                            CleanupCandidate(
+                                kind: .screenshots,
+                                title: "Screenshot: \(file.name)",
+                                whatWillBeRemoved: "Screenshot or screen recording '\(file.name)' (unused for \(days) days)",
+                                locationURL: file.url,
+                                sizeBytes: file.size,
+                                lastUsedDate: file.lastUsedDate,
+                                whyRecommended: "Screenshots and recordings pile up and are rarely reopened after \(days) days.",
+                                potentialConsequences: "The image or video is gone unless saved elsewhere.",
+                                confidence: 45
+                            )
+                        )
+                    }
+                    continue
+                }
                 guard file.size >= minCandidateBytes else {
                     continue
                 }
@@ -176,8 +210,7 @@ public struct SmartCleanupEngine: Sendable {
                             lastUsedDate: file.lastUsedDate,
                             whyRecommended: "Installer packages and disk images are typically no longer needed once the app is installed in /Applications.",
                             potentialConsequences: "If you need to reinstall offline later, you would re-download the installer.",
-                            risk: isInDownloads ? .low : .moderate,
-                            isSelected: isInDownloads
+                            confidence: isInDownloads ? 85 : 60
                         )
                     )
                     continue
@@ -201,8 +234,7 @@ public struct SmartCleanupEngine: Sendable {
                                 lastUsedDate: file.lastUsedDate,
                                 whyRecommended: "Large scratch and log files accumulate over time and are not required for normal app operation.",
                                 potentialConsequences: "Past diagnostic log entries in this file will be moved to Trash.",
-                                risk: .low,
-                                isSelected: true
+                                confidence: 85
                             )
                         )
                         continue
@@ -224,8 +256,7 @@ public struct SmartCleanupEngine: Sendable {
                             lastUsedDate: file.lastUsedDate,
                             whyRecommended: "Compressed archive in Downloads untouched for \(daysUnused) days and likely already extracted.",
                             potentialConsequences: "Verify that extracted contents are saved elsewhere before moving to Trash.",
-                            risk: .low,
-                            isSelected: false
+                            confidence: 60
                         )
                     )
                     continue
@@ -245,8 +276,7 @@ public struct SmartCleanupEngine: Sendable {
                             lastUsedDate: file.lastUsedDate,
                             whyRecommended: "Occupies \(ByteFormatting.string(file.size)) and has not been opened or used in \(daysUnused) days (threshold: \(unusedDaysThreshold) days).",
                             potentialConsequences: "Moved to macOS Trash; review if this is an archival media or backup file you still need.",
-                            risk: isLowRiskLocation ? .low : .moderate,
-                            isSelected: false
+                            confidence: isLowRiskLocation ? 45 : 40
                         )
                     )
                 }
@@ -260,7 +290,8 @@ public struct SmartCleanupEngine: Sendable {
                       let size = item.sizeBytes,
                       size >= 5 * 1024 * 1024,
                       !Self.isProtectedSystemPath(url.path, resolveSymlinks: false),
-                      !seenPaths.contains(url.path) else {
+                      !seenPaths.contains(url.path),
+                      !junkPrefixes.contains(where: { $0.hasPrefix(url.path + "/") }) else {
                     continue
                 }
                 seenPaths.insert(url.path)
@@ -275,8 +306,7 @@ public struct SmartCleanupEngine: Sendable {
                         lastUsedDate: nil,
                         whyRecommended: item.explanation,
                         potentialConsequences: item.potentialRisks,
-                        risk: .low,
-                        isSelected: false
+                        confidence: 85
                     )
                 )
             }
@@ -301,19 +331,22 @@ public struct SmartCleanupEngine: Sendable {
                         lastUsedDate: dup.modificationDate,
                         whyRecommended: "An identical original file with the exact same SHA-256 hash is preserved in another folder.",
                         potentialConsequences: "Only this redundant duplicate is moved to Trash; the original copy remains untouched.",
-                        risk: .low,
-                        isSelected: true
+                        confidence: 90
                     )
                 )
             }
         }
 
+        candidates.removeAll { $0.confidence < aggressiveness.listMin }
+        for i in candidates.indices {
+            candidates[i].isSelected = candidates[i].confidence >= aggressiveness.autoSelectMin
+        }
         candidates.sort { $0.sizeBytes > $1.sizeBytes }
         return candidates
     }
 
-    /// Safely moves selected URLs to the macOS Trash. Never permanently deletes files.
-    public func moveItemsToTrash(urls: [URL], itemSizes: [URL: Int64] = [:]) async -> CleanupExecutionResult {
+    /// Moves selected URLs to the Trash, or with `.permanent` deletes them immediately (home folder and /private/var/tmp only).
+    public func moveItemsToTrash(urls: [URL], itemSizes: [URL: Int64] = [:], mode: DeletionMode = .trash) async -> CleanupExecutionResult {
         var safeURLs: [URL] = []
         var failures: [(path: String, reason: String)] = []
 
@@ -322,10 +355,17 @@ public struct SmartCleanupEngine: Sendable {
             normalizedSizes[k.standardizedFileURL.path] = v
         }
 
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let needsAppIndex = urls.contains { $0.standardizedFileURL.path.hasPrefix(Self.appSupportPrefix) }
+        let installedApps = needsAppIndex ? JunkScanner.installedAppIDs() : nil
         for url in urls {
             let path = url.standardizedFileURL.path
-            if Self.isProtectedSystemPath(path, resolveSymlinks: true) {
+            if Self.isProtectedSystemPath(path, resolveSymlinks: true, installedApps: installedApps) {
                 failures.append((path: path, reason: "Protected macOS system path cannot be modified."))
+                continue
+            }
+            if mode == .permanent && !path.hasPrefix(home + "/") && !(path + "/").hasPrefix("/private/var/tmp/") {
+                failures.append((path: path, reason: "Permanent deletion is limited to your home folder; use Move to Trash."))
                 continue
             }
             if !FileManager.default.fileExists(atPath: path) {
@@ -341,15 +381,22 @@ public struct SmartCleanupEngine: Sendable {
 
         var movedCount = 0
         var reclaimed: Int64 = 0
-        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let trashRoot = "\(home)/.Trash"
+        func remove(_ target: URL) throws {
+            // Emptying the Trash is always permanent; moving its contents back into it would free nothing.
+            if mode == .permanent || target.standardizedFileURL.path.hasPrefix(trashRoot + "/") {
+                try FileManager.default.removeItem(at: target)
+            } else {
+                try FileManager.default.trashItem(at: target, resultingItemURL: nil)
+            }
+        }
         let cachesRoot = "\(home)/Library/Caches"
         let homebrewRoot = "\(home)/Library/Caches/Homebrew"
-        let containerRootsToKeepIntact: Set<String> = [
+        let containerRootsToKeepIntact: Set<String> = JunkScanner.containerRoots(home: home).union([
             cachesRoot,
             "\(home)/Library/Logs",
-            "\(home)/Library/Developer/Xcode/DerivedData",
             "/private/var/tmp"
-        ]
+        ])
 
         let selectedPathSet = Set(safeURLs.map { $0.standardizedFileURL.path })
         let sortedSafeURLs = safeURLs.sorted { $0.standardizedFileURL.path.count < $1.standardizedFileURL.path.count }
@@ -363,8 +410,11 @@ public struct SmartCleanupEngine: Sendable {
 
             let fallbackSize = normalizedSizes[path] ?? (Int64((try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileSizeKey]).totalFileAllocatedSize) ?? 0))
 
-            if containerRootsToKeepIntact.contains(path),
-               let children = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileSizeKey]) {
+            if containerRootsToKeepIntact.contains(path) {
+                guard let children = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileSizeKey]) else {
+                    failures.append((path: path, reason: "Cannot read '\(url.lastPathComponent)'; grant Full Disk Access to clean it."))
+                    continue
+                }
                 processedPaths.insert(path)
                 var childMoved = 0
                 for child in children {
@@ -373,8 +423,7 @@ public struct SmartCleanupEngine: Sendable {
                     if path == cachesRoot && childPath == homebrewRoot && !selectedPathSet.contains(homebrewRoot) {
                         continue
                     }
-                    var trashedURL: NSURL?
-                    if (try? FileManager.default.trashItem(at: child, resultingItemURL: &trashedURL)) != nil {
+                    if (try? remove(child)) != nil {
                         childMoved += 1
                     }
                 }
@@ -391,12 +440,11 @@ public struct SmartCleanupEngine: Sendable {
             processedPaths.insert(path)
 
             do {
-                var trashedURL: NSURL?
-                try FileManager.default.trashItem(at: url, resultingItemURL: &trashedURL)
+                try remove(url)
                 movedCount += 1
                 reclaimed += fallbackSize
             } catch {
-                let recycled = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                let recycled = mode == .permanent ? false : await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                     NSWorkspace.shared.recycle([url]) { newURLs, recycleError in
                         continuation.resume(returning: recycleError == nil && !newURLs.isEmpty)
                     }

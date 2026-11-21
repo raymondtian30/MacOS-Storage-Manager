@@ -120,7 +120,7 @@ public struct MainWindowView: View {
             OverviewView(appState: appState)
         case .analyzer:
             StorageAnalyzerView(appState: appState)
-        case .deleteHub:
+        case .spaceReclaimer:
             SmartCleanupView(appState: appState)
         case .systemData:
             SystemDataView(appState: appState)

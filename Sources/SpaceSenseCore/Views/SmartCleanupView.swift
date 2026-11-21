@@ -29,6 +29,7 @@ public struct SmartCleanupView: View {
     @State private var selectedLargeFileIDs: Set<String> = []
     @State private var previewingFile: LargeFileItem?
     @State private var showingReviewSheet: Bool = false
+    @State private var deletionMode: DeletionMode = .permanent
 
     public init(appState: AppState) {
         self.appState = appState
@@ -63,7 +64,7 @@ public struct SmartCleanupView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .sheet(item: $previewingFile) { item in
-            DeleteHubPreviewModal(file: item, appState: appState)
+            ReclaimerPreviewModal(file: item, appState: appState)
         }
         .sheet(isPresented: $showingReviewSheet) {
             confirmationSheetContent
@@ -74,17 +75,17 @@ public struct SmartCleanupView: View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 10) {
                 SectionHeaderBar(
-                    title: "Delete Hub",
+                    title: "Space Reclaimer",
                     subtitle: "Unused large files (> \(appState.unusedFileDaysThreshold)d), duplicates, caches, and safe cleanup",
-                    icon: NavigationSection.deleteHub.icon
+                    icon: NavigationSection.spaceReclaimer.icon
                 )
                 headerActionButtons(selectedCount: selectedCount, selectedBytes: selectedBytes)
             }
             VStack(alignment: .leading, spacing: 8) {
                 SectionHeaderBar(
-                    title: "Delete Hub",
+                    title: "Space Reclaimer",
                     subtitle: "Unused large files (> \(appState.unusedFileDaysThreshold)d), duplicates, caches, and safe cleanup",
-                    icon: NavigationSection.deleteHub.icon
+                    icon: NavigationSection.spaceReclaimer.icon
                 )
                 headerActionButtons(selectedCount: selectedCount, selectedBytes: selectedBytes)
             }
@@ -93,6 +94,25 @@ public struct SmartCleanupView: View {
 
     private func headerActionButtons(selectedCount: Int, selectedBytes: Int64) -> some View {
         HStack(spacing: 8) {
+            Picker("Aggressiveness", selection: $appState.aggressiveness) {
+                ForEach(CleanupAggressiveness.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Conservative: nothing pre-selected. Balanced: pre-select regenerable junk. Max: also pre-select app leftovers, archives, and installers.")
+
+            Button {
+                Task {
+                    await appState.runJunkScan()
+                }
+            } label: {
+                Label(appState.isScanningJunk ? "Scanning…" : "Deep Scan Junk", systemImage: "sparkle.magnifyingglass")
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .disabled(appState.isScanningJunk)
+
             Button {
                 Task {
                     await appState.refreshCleanupRecommendationsAsync()
@@ -116,7 +136,7 @@ public struct SmartCleanupView: View {
                 showingReviewSheet = true
             } label: {
                 Label(
-                    "Move \(selectedCount) to Trash (\(ByteFormatting.string(selectedBytes)))",
+                    "Clean \(selectedCount) (\(ByteFormatting.string(selectedBytes)))",
                     systemImage: "trash.fill"
                 )
                 .fontWeight(.semibold)
@@ -290,7 +310,7 @@ public struct SmartCleanupView: View {
                         .background(SpaceSenseTheme.slate.opacity(0.15), in: Capsule())
                         .lineLimit(1)
 
-                    Text(candidate.risk.rawValue)
+                    Text("\(candidate.risk.rawValue) · \(candidate.confidence)%")
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -860,11 +880,13 @@ public struct SmartCleanupView: View {
                     .font(.title)
                     .foregroundStyle(SpaceSenseTheme.accent)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Confirm Move to Trash — \(summary.count) Item(s)")
+                    Text("Confirm Cleanup — \(summary.count) Item(s)")
                         .font(.headline)
-                    Text("Reclaims \(ByteFormatting.string(summary.bytes)). Selected items will be moved safely to your macOS Trash and are never permanently deleted.")
+                    Text(deletionMode == .permanent
+                         ? "Frees \(ByteFormatting.string(summary.bytes)) immediately. Permanently deleted items cannot be recovered."
+                         : "Moves \(ByteFormatting.string(summary.bytes)) to the Trash. Space is freed once the Trash is emptied.")
                         .font(.caption)
-                        .foregroundStyle(SpaceSenseTheme.slate)
+                        .foregroundStyle(deletionMode == .permanent ? .red : SpaceSenseTheme.slate)
                 }
             }
 
@@ -883,20 +905,27 @@ public struct SmartCleanupView: View {
             }
             .frame(minHeight: 160, idealHeight: 230, maxHeight: 340)
 
+            Picker("Mode", selection: $deletionMode) {
+                Text(DeletionMode.permanent.rawValue).tag(DeletionMode.permanent)
+                Text(DeletionMode.trash.rawValue).tag(DeletionMode.trash)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) {
                     showingReviewSheet = false
                 }
-                Button("Move \(summary.count) Item(s) to Trash") {
+                Button("\(deletionMode.rawValue) (\(summary.count))") {
                     Task {
-                        _ = await appState.moveURLsToTrash(summary.urls, sizes: summary.sizes)
+                        _ = await appState.deleteURLs(summary.urls, sizes: summary.sizes, mode: deletionMode)
                         selectedLargeFileIDs.removeAll()
                         showingReviewSheet = false
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(SpaceSenseTheme.accent)
+                .tint(deletionMode == .permanent ? .red : SpaceSenseTheme.accent)
             }
         }
         .padding(20)
@@ -904,7 +933,7 @@ public struct SmartCleanupView: View {
     }
 }
 
-private struct DeleteHubPreviewModal: View {
+private struct ReclaimerPreviewModal: View {
     let file: LargeFileItem
     let appState: AppState
     @Environment(\.dismiss) private var dismiss

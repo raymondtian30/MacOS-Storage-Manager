@@ -23,7 +23,7 @@ public enum AppAppearanceMode: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 @Observable
 public final class AppState {
-    public nonisolated static let currentVersion = "1.2.2"
+    public nonisolated static let currentVersion = "1.3.0"
 
     // Navigation
     public var selectedSection: NavigationSection = .overview
@@ -39,13 +39,21 @@ public final class AppState {
     public var analyzerBreadcrumbs: [FileNode] = []
     public var analyzerCategoryFilter: StorageCategory?
 
-    // Duplicate & Delete Hub state
+    // Duplicate & Space Reclaimer state
     public var isFindingDuplicates: Bool = false
     public var isRefreshingCleanup: Bool = false
     public var duplicateProgress: (processed: Int, total: Int) = (0, 0)
     public var duplicateGroups: [DuplicateGroup] = []
     public var duplicateMinimumSizeMB: Double = 1.0
     public var cleanupCandidates: [CleanupCandidate] = []
+    public var junkCandidates: [CleanupCandidate] = []
+    public var isScanningJunk: Bool = false
+    public var aggressiveness: CleanupAggressiveness {
+        didSet {
+            UserDefaults.standard.set(aggressiveness.rawValue, forKey: "spacesense.aggressiveness")
+            Task { await refreshCleanupRecommendationsAsync() }
+        }
+    }
     public var lastCleanupResult: CleanupExecutionResult?
 
     // System Data state
@@ -60,7 +68,7 @@ public final class AppState {
     public var aiMessages: [AIMessage] = [
         AIMessage(
             role: .assistant,
-            content: "Welcome to **SpaceSense AI**. Run a storage scan, then ask me why your disk is filling up, which unused files are safe to remove in Delete Hub, or which folders have grown the most."
+            content: "Welcome to **SpaceSense AI**. Run a storage scan, then ask me why your disk is filling up, which unused files are safe to remove in Space Reclaimer, or which folders have grown the most."
         )
     ]
     public var isAIThinking: Bool = false
@@ -191,6 +199,7 @@ public final class AppState {
         self.appearanceMode = AppAppearanceMode(rawValue: savedAppearance) ?? .dark
         self.enableScanNotifications = defaults.object(forKey: "spacesense.enableScanNotifications") as? Bool ?? false
         self.shareFullPathsWithAI = defaults.object(forKey: "spacesense.shareFullPathsWithAI") as? Bool ?? true
+        self.aggressiveness = CleanupAggressiveness(rawValue: defaults.string(forKey: "spacesense.aggressiveness") ?? "") ?? .balanced
 
         _ = bookmarkManager.restoreSavedBookmarks()
         if let savedKey = keychainService.loadAPIKey() {
@@ -213,7 +222,17 @@ public final class AppState {
 
         Task {
             await refreshSystemData()
+            await runJunkScan()
         }
+    }
+
+    public func runJunkScan() async {
+        guard !isScanningJunk else { return }
+        isScanningJunk = true
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        junkCandidates = await Task.detached(priority: .userInitiated) { JunkScanner.scan(home: home) }.value
+        isScanningJunk = false
+        await refreshCleanupRecommendationsAsync()
     }
 
     public func refreshVolumeStats() {
@@ -331,7 +350,7 @@ public final class AppState {
         analyzerCurrentNode = analyzerBreadcrumbs.last
     }
 
-    // MARK: - Duplicate Finder & Delete Hub
+    // MARK: - Duplicate Finder & Space Reclaimer
 
     public func runDuplicateScan() async {
         guard let scanResult = latestScanResult else { return }
@@ -427,6 +446,8 @@ public final class AppState {
         let unusedDays = unusedFileDaysThreshold
         let thresholdBytes = Int64(largeFileThresholdMB * 1024 * 1024)
         let engine = cleanupEngine
+        let junkSnapshot = junkCandidates
+        let level = aggressiveness
 
         let wrapperTask = Task { @MainActor in
             let built = await Task.detached(priority: .userInitiated) { () -> [CleanupCandidate] in
@@ -435,7 +456,9 @@ public final class AppState {
                     systemDataReport: sysSnapshot,
                     duplicateGroups: dupSnapshot,
                     unusedDaysThreshold: unusedDays,
-                    largeFileThresholdBytes: thresholdBytes
+                    largeFileThresholdBytes: thresholdBytes,
+                    junkCandidates: junkSnapshot,
+                    aggressiveness: level
                 )
             }.value
 
@@ -451,8 +474,8 @@ public final class AppState {
         cleanupCandidates.reduce(0) { $0 + $1.sizeBytes }
     }
 
-    public func moveURLsToTrash(_ urls: [URL], sizes: [URL: Int64] = [:]) async -> CleanupExecutionResult {
-        let result = await cleanupEngine.moveItemsToTrash(urls: urls, itemSizes: sizes)
+    public func deleteURLs(_ urls: [URL], sizes: [URL: Int64] = [:], mode: DeletionMode) async -> CleanupExecutionResult {
+        let result = await cleanupEngine.moveItemsToTrash(urls: urls, itemSizes: sizes, mode: mode)
         lastCleanupResult = result
         refreshVolumeStats()
 
@@ -463,6 +486,7 @@ public final class AppState {
         )
 
         cleanupCandidates.removeAll { Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.locationURL.standardizedFileURL.path), in: trashedSet) }
+        junkCandidates.removeAll { Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.locationURL.standardizedFileURL.path), in: trashedSet) }
 
         for idx in duplicateGroups.indices {
             duplicateGroups[idx].files.removeAll { Self.isPathOrDescendant(StorageScanner.fastCleanPath($0.url.standardizedFileURL.path), in: trashedSet) }
@@ -549,10 +573,12 @@ public final class AppState {
         await refreshCleanupRecommendationsAsync()
 
         if result.movedToTrashCount > 0 {
-            statusBannerMessage = "Moved \(result.movedToTrashCount) item(s) (\(ByteFormatting.string(result.reclaimedBytes))) to Trash."
+            statusBannerMessage = mode == .permanent
+                ? "Deleted \(result.movedToTrashCount) item(s), freed \(ByteFormatting.string(result.reclaimedBytes))."
+                : "Moved \(result.movedToTrashCount) item(s) (\(ByteFormatting.string(result.reclaimedBytes))) to Trash."
         }
         if let firstFailure = result.failures.first {
-            activeErrorMessage = "Could not move '\(firstFailure.path)' to Trash: \(firstFailure.reason)"
+            activeErrorMessage = "Could not remove '\(firstFailure.path)': \(firstFailure.reason)"
         }
         return result
     }
@@ -688,7 +714,7 @@ public final class AppState {
         aiMessages = [
             AIMessage(
                 role: .assistant,
-                content: "Conversation cleared. Ask me any question about your latest storage scan, System Data, or Delete Hub recommendations."
+                content: "Conversation cleared. Ask me any question about your latest storage scan, System Data, or Space Reclaimer recommendations."
             )
         ]
     }

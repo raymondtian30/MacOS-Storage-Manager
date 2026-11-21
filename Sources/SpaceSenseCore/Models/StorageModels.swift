@@ -4,7 +4,7 @@ import SwiftUI
 public enum NavigationSection: String, CaseIterable, Identifiable, Sendable {
     case overview = "Overview"
     case analyzer = "Storage Analyzer"
-    case deleteHub = "Delete Hub"
+    case spaceReclaimer = "Space Reclaimer"
     case systemData = "System Data"
     case history = "Storage History"
     case aiAssistant = "AI Assistant"
@@ -16,7 +16,7 @@ public enum NavigationSection: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .overview: return "gauge.with.dots.needle.bottom.50percent"
         case .analyzer: return "square.grid.3x2.fill"
-        case .deleteHub: return "trash.slash.fill"
+        case .spaceReclaimer: return "trash.slash.fill"
         case .systemData: return "externaldrive.fill.badge.timemachine"
         case .history: return "chart.xyaxis.line"
         case .aiAssistant: return "sparkles.rectangle.stack.fill"
@@ -28,7 +28,7 @@ public enum NavigationSection: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .overview: return "Disk health, category breakdown, and recent activity"
         case .analyzer: return "Interactive treemap and hierarchical folder browser"
-        case .deleteHub: return "Unified hub for unused large files, duplicates, caches, and safe cleanup"
+        case .spaceReclaimer: return "Caches, build folders, app leftovers, duplicates, and unused large files"
         case .systemData: return "Inspect caches, logs, developer artifacts, and system folders"
         case .history: return "Track storage utilization and growing folders over time"
         case .aiAssistant: return "Ask your AI model questions grounded in actual scan data"

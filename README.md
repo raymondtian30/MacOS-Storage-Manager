@@ -1,6 +1,6 @@
 # SpaceSense — AI-Powered macOS Storage Manager
 
-**Current Version:** `v1.2.2`
+**Current Version:** `v1.3.0`
 
 SpaceSense is a native macOS Dock application built with Swift and SwiftUI for Apple Silicon Macs (macOS 14+). It helps users understand, analyze, visualize, organize, and safely reclaim disk space on their Macs using local filesystem telemetry, cryptographic SHA-256 duplicate detection, SQLite storage history, and an optional Google Gemini AI assistant.
 
@@ -13,7 +13,7 @@ SpaceSense is a native macOS Dock application built with Swift and SwiftUI for A
 3. **Large Files Finder**: Sort and filter large files by size, file extension, modification date, and filename; preview text/images via native Quick Look / preview sheet; reveal or open in Finder; and review selections before moving to Trash.
 4. **Duplicate Finder (CryptoKit SHA-256)**: 3-stage duplicate detection pipeline (exact size grouping → 64 KB head/tail pre-hash → streaming full SHA-256 digest) that automatically preserves at least one copy per duplicate group by default.
 5. **System Data Analyzer**: Inspects real user and system library paths (`~/Library/Caches`, `~/Library/Logs`, `Xcode/DerivedData`, `Xcode/Archives`, `CoreSimulator`, `MobileSync/Backup`, `Application Support`, `Containers`, `Homebrew`, `/private/var/tmp`), clearly distinguishing **Measured**, **Estimated** (APFS snapshots/VM swap), and **Restricted** (SIP/Full Disk Access) storage.
-6. **Smart Cleanup**: Generates safe cleanup candidates with 5-part explanations (what will be removed, location, size, why recommended, potential consequences), requires explicit confirmation, and moves items exclusively to the macOS Trash.
+6. **Space Reclaimer**: Deep-scans browser and app caches, package-manager caches (npm, pnpm, Bun, uv, Cargo, Go, Gradle, Maven, Homebrew…), Xcode DerivedData/DeviceSupport, stale project build folders (`node_modules`, `target`, `.build`, `.venv`…), leftovers of uninstalled apps, the Trash, iOS updates, and old screenshots. Each candidate gets a 0–100 confidence score; a Conservative / Balanced / Max selector controls what is listed and pre-selected. After explicit confirmation, items are deleted permanently (default, home folder only) or moved to the Trash.
 7. **Storage History (SQLite + Swift Charts)**: Persists scan snapshots in `~/Library/Application Support/SpaceSense/storage_history.sqlite`, visualizes disk usage trends and category growth over time, and highlights growing folders.
 8. **AI Storage Assistant (Gemini API)**: Answers natural-language questions grounded strictly in actual scan telemetry, with a built-in Telemetry Inspector showing the exact metadata sent to Gemini.
 9. **Settings & Privacy**: Stores the Gemini API key in the macOS Keychain, configures AI models (`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`), manages scan exclusions, history retention, appearance (`Dark`, `Light`, `System`), notifications, and path privacy.
@@ -55,6 +55,7 @@ swift test --enable-swift-testing --disable-xctest
 
 ## Version History
 
+- **`v1.3.0`** — Delete Hub renamed **Space Reclaimer**: junk deep scan with confidence scoring, Conservative/Balanced/Max aggressiveness, and permanent deletion (with Move to Trash option) that frees space immediately.
 - **`v1.2.2`** — Major post-scan performance and UI responsiveness optimizations: zero-I/O System Data reuse from scan tree measurements, throttled duplicate hashing with cooperative yielding and internal-directory exclusions, background SQLite snapshot persistence, precomputed static path-protection tables, cached `ByteFormatting` & `NSWorkspace` file icons, scoped treemap/list hover state, and native SwiftUI progress bars.
 - **`v1.2.1`** — Responsive fluid window shrinking (`680×480` minimum with adaptive grids, `ViewThatFits` headers/toolbars, and dynamic split views), full tree & System Data state pruning after Trash operations, hardened protected-path & SHA-256 read verification, and multi-agent review improvements.
 - **`v1.2.0`** — Faster bottom-up filesystem scanner with determinate percent bar & stop-scan confirmation prompt, unified **Delete Hub** (with Unused Large Files detection, 250 MB–1 GB thresholds, SHA-256 duplicates, and non-blocking async refresh), universal AI API key support with automatic provider & model detection, hover tooltips on technical concepts, 3-color modern palette, and About/Credits with GitHub release update checker.

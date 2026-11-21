@@ -204,7 +204,7 @@ public struct AIAssistantView: View {
     private var inputBar: some View {
         SurfaceCard(padding: 10) {
             HStack(spacing: 10) {
-                TextField("Ask about your storage scan results, System Data, or Delete Hub candidates…", text: $inputPrompt)
+                TextField("Ask about your storage scan results, System Data, or Space Reclaimer candidates…", text: $inputPrompt)
                     .textFieldStyle(.plain)
                     .onSubmit {
                         submitPrompt()

@@ -247,4 +247,86 @@ struct SpaceSenseTests {
         #expect(summary.contains("ACTUAL MAC STORAGE TELEMETRY"))
         #expect(summary.contains(vol.volumeName))
     }
+
+    @Test("Space Reclaimer aggressiveness presets")
+    func aggressivenessPresets() {
+        #expect(CleanupAggressiveness.conservative.autoSelectMin > 100)
+        #expect(CleanupAggressiveness.conservative.listMin == 80)
+        #expect(CleanupAggressiveness.balanced.autoSelectMin == 80)
+        #expect(CleanupAggressiveness.balanced.listMin == 40)
+        #expect(CleanupAggressiveness.max.autoSelectMin == 50)
+        #expect(CleanupAggressiveness.max.listMin == 0)
+    }
+
+    @Test("Orphaned app folder detection")
+    func orphanDetection() {
+        let installed: Set<String> = ["com.tinyspeck.slackmacgap", "com.microsoft.word"]
+        #expect(JunkScanner.isOrphanName("com.removed.SomeApp", installed: installed))
+        #expect(JunkScanner.isOrphanName("com.removed.SomeApp.savedState", installed: installed))
+        #expect(!JunkScanner.isOrphanName("com.tinyspeck.slackmacgap", installed: installed))
+        #expect(!JunkScanner.isOrphanName("com.microsoft.excel", installed: installed))
+        #expect(!JunkScanner.isOrphanName("com.apple.Safari", installed: installed))
+        #expect(!JunkScanner.isOrphanName("group.com.removed.app", installed: installed))
+        #expect(!JunkScanner.isOrphanName("Slack", installed: installed))
+    }
+
+    @Test("Junk scanner finds stale project build folders and package caches")
+    func junkScannerFindsBuildFolders() throws {
+        let home = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let project = home.appendingPathComponent("Code/web", isDirectory: true)
+        let modules = project.appendingPathComponent("node_modules/pkg", isDirectory: true)
+        try FileManager.default.createDirectory(at: modules, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: project.appendingPathComponent("package.json"))
+        try Data(repeating: 1, count: 300_000).write(to: modules.appendingPathComponent("index.js"))
+        let npm = home.appendingPathComponent(".npm/_cacache", isDirectory: true)
+        try FileManager.default.createDirectory(at: npm, withIntermediateDirectories: true)
+        try Data(repeating: 2, count: 300_000).write(to: npm.appendingPathComponent("blob"))
+
+        let found = JunkScanner.scan(home: home, minBytes: 1)
+        #expect(found.contains { $0.kind == .projectBuildArtifacts && $0.locationURL.lastPathComponent == "node_modules" })
+        #expect(found.contains { $0.kind == .packageCaches && $0.locationURL.path.hasSuffix(".npm/_cacache") })
+    }
+
+    @Test("Permanent deletion frees space, empties container roots, and refuses paths outside home")
+    func permanentDeletion() async throws {
+        let engine = SmartCleanupEngine()
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dir = home.appendingPathComponent(".spacesense-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("junk.bin")
+        try Data(repeating: 3, count: 4096).write(to: file)
+
+        let result = await engine.moveItemsToTrash(urls: [file], mode: .permanent)
+        #expect(result.movedToTrashCount == 1)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+
+        let outside = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let outsideFile = outside.appendingPathComponent("x.bin")
+        try Data(repeating: 4, count: 10).write(to: outsideFile)
+        let refused = await engine.moveItemsToTrash(urls: [outsideFile], mode: .permanent)
+        #expect(refused.movedToTrashCount == 0)
+        #expect(FileManager.default.fileExists(atPath: outsideFile.path))
+
+        let protected = await engine.moveItemsToTrash(urls: [URL(fileURLWithPath: "/System/Library")], mode: .permanent)
+        #expect(protected.failures.count == 1)
+    }
+
+    @Test("Recommendations respect aggressiveness and include junk candidates")
+    func recommendationsUseAggressiveness() {
+        let engine = SmartCleanupEngine()
+        let junk = [
+            CleanupCandidate(kind: .packageCaches, title: "npm", whatWillBeRemoved: "x", locationURL: URL(fileURLWithPath: "/Users/x/.npm/_cacache"), sizeBytes: 100, whyRecommended: "x", potentialConsequences: "x", confidence: 85),
+            CleanupCandidate(kind: .orphanedAppData, title: "o", whatWillBeRemoved: "x", locationURL: URL(fileURLWithPath: "/Users/x/Library/Caches/com.gone.app"), sizeBytes: 50, whyRecommended: "x", potentialConsequences: "x", confidence: 55)
+        ]
+        let balanced = engine.buildRecommendations(scanResult: nil, systemDataReport: nil, duplicateGroups: [], junkCandidates: junk, aggressiveness: .balanced)
+        #expect(balanced.count == 2)
+        #expect(balanced.filter(\.isSelected).count == 1)
+        let conservative = engine.buildRecommendations(scanResult: nil, systemDataReport: nil, duplicateGroups: [], junkCandidates: junk, aggressiveness: .conservative)
+        #expect(conservative.count == 1 && conservative.allSatisfy { !$0.isSelected })
+        let maxed = engine.buildRecommendations(scanResult: nil, systemDataReport: nil, duplicateGroups: [], junkCandidates: junk, aggressiveness: .max)
+        #expect(maxed.allSatisfy { $0.isSelected })
+    }
 }
